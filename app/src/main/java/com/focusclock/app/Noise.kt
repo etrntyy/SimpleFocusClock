@@ -5,18 +5,26 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.random.Random
 
-/** The coloured noises on offer, each described by how its energy is spread across frequencies. */
-enum class NoiseKind(val label: String, val blurb: String) {
-    White("White noise", "Equal energy at every frequency. A bright, even hiss."),
-    Pink("Pink noise", "Softer highs, like steady rain or wind."),
-    Brown("Brown noise", "Deep and rumbling, like a waterfall or distant thunder. Also called red."),
-    Blue("Blue noise", "Boosted highs, a thin sharp hiss."),
-    Violet("Violet noise", "Even more treble, very bright. Also called purple."),
-    Grey("Grey noise", "Balanced to sound equally loud at all pitches."),
-    Green("Green noise", "Centred on the mid-range, like the sound of a forest."),
+/** The noises on offer: the coloured ones are shaped by frequency, the rest imitate natural sounds. */
+enum class NoiseKind(val label: String) {
+    White("White noise"),
+    Pink("Pink noise"),
+    Brown("Brown noise"),
+    Blue("Blue noise"),
+    Violet("Violet noise"),
+    Grey("Grey noise"),
+    Green("Green noise"),
+    Rain("Rain"),
+    Thunder("Thunderstorm"),
+    Ocean("Ocean waves"),
+    Wind("Wind"),
+    Stream("Stream"),
+    Fire("Campfire"),
+    Fan("Fan"),
 }
 
 /** Streams generated noise through an [AudioTrack]. Alarm usage keeps it audible under alarms-only Do Not Disturb. */
@@ -96,6 +104,45 @@ internal class NoiseGenerator(private val kind: NoiseKind, rate: Int, private va
 
     private fun white() = rng.nextFloat() * 2f - 1f
 
+    private val rateD = rate.toDouble()
+    private fun coef(fc: Double) = (1.0 - exp(-2.0 * PI * fc / rateD)).toFloat()
+    private fun phaseStep(seconds: Double) = 2.0 * PI / (rateD * seconds)
+
+    // Natural sounds.
+    private var hissLp = 0f
+    private var dropEnv = 0f
+    private var thunderEnv = 0f
+    private var thunderLp = 0f
+    private var oceanLp = 0f
+    private var oceanHiss = 0f
+    private var phA = 0.0
+    private var phB = 0.0
+    private var windA = 0f
+    private var windB = 0f
+    private var streamHi = 0f
+    private var streamLo = 0f
+    private var streamSlow = 0f
+    private var fireBrown = 0f
+    private var fireLp = 0f
+    private var crackEnv = 0f
+    private var fanBrown = 0f
+    private var fanLp = 0f
+    private val aHiss = coef(1500.0)
+    private val aThunder = coef(80.0)
+    private val aStreamHi = coef(4000.0)
+    private val aStreamLo = coef(700.0)
+    private val aStreamSlow = coef(14.0)
+    private val aFire = coef(2000.0)
+    private val aFan = coef(1200.0)
+    private val aOceanHiss = coef(1500.0)
+
+    private fun rain(w: Float): Float {
+        hissLp += aHiss * (w - hissLp)
+        if (rng.nextFloat() < 0.0007f) dropEnv = 0.5f + rng.nextFloat() * 0.5f
+        dropEnv *= 0.994f
+        return (w - hissLp) * 0.35f + pink(w) * 0.9f + white() * dropEnv * 0.5f
+    }
+
     private fun pink(w: Float): Float {
         b0 = 0.99886f * b0 + w * 0.0555179f
         b1 = 0.99332f * b1 + w * 0.0750759f
@@ -111,7 +158,7 @@ internal class NoiseGenerator(private val kind: NoiseKind, rate: Int, private va
     fun next(): Float {
         val w = white()
         return when (kind) {
-            NoiseKind.White -> w
+            NoiseKind.White -> w * 0.6f
             NoiseKind.Pink -> pink(w) * 1.6f
             NoiseKind.Brown -> {
                 brown = (brown + 0.02f * w) / 1.02f
@@ -134,6 +181,52 @@ internal class NoiseGenerator(private val kind: NoiseKind, rate: Int, private va
                 val high = w - prevWhite
                 prevWhite = w
                 0.35f * w + 2f * low + 0.25f * high
+            }
+            NoiseKind.Rain -> rain(w)
+            NoiseKind.Thunder -> {
+                if (rng.nextFloat() < 1f / (rateD * 14.0).toFloat()) thunderEnv = 1f
+                thunderEnv *= 1f - 1f / (rateD * 3.5).toFloat()
+                thunderLp += aThunder * (white() - thunderLp)
+                rain(w) * 0.7f + thunderLp * (0.06f + thunderEnv) * 7f
+            }
+            NoiseKind.Ocean -> {
+                phA += phaseStep(9.0); phB += phaseStep(13.7)
+                val env = (0.5 + 0.5 * sin(phA)) * (0.7 + 0.3 * sin(phB))
+                val e = 0.25f + 0.75f * env.toFloat()
+                oceanLp += (0.015f + 0.25f * e * e) * (pink(w) - oceanLp)
+                oceanHiss += aOceanHiss * (w - oceanHiss)
+                oceanLp * e * 2.4f + (w - oceanHiss) * e * e * e * 0.18f
+            }
+            NoiseKind.Wind -> {
+                phA += phaseStep(7.3); phB += phaseStep(3.1)
+                val gust = (0.25 + 0.75 * (0.5 + 0.5 * sin(phA)) * (0.65 + 0.35 * sin(phB))).toFloat()
+                val fc = 250.0 + 650.0 * gust
+                windA += coef(fc) * (w - windA)
+                windB += coef(fc * 0.25) * (w - windB)
+                (windA - windB) * gust * 5f
+            }
+            NoiseKind.Stream -> {
+                streamHi += aStreamHi * (w - streamHi)
+                streamLo += aStreamLo * (w - streamLo)
+                streamSlow += aStreamSlow * (white() - streamSlow)
+                val burble = (0.7f + streamSlow * 18f).coerceIn(0.2f, 1.6f)
+                (streamHi - streamLo) * burble * 1.6f
+            }
+            NoiseKind.Fire -> {
+                fireBrown = (fireBrown + 0.02f * w) / 1.02f
+                fireLp += aFire * (white() - fireLp)
+                if (rng.nextFloat() < 0.0012f) crackEnv = rng.nextFloat() * 0.7f
+                if (rng.nextFloat() < 0.00004f) crackEnv = 1f
+                crackEnv *= 0.99f
+                fireBrown * 2f + fireLp * 0.5f + white() * crackEnv * 0.8f
+            }
+            NoiseKind.Fan -> {
+                phA += 2.0 * PI * 95.0 / rateD
+                phB += phaseStep(5.0)
+                fanBrown = (fanBrown + 0.02f * w) / 1.02f
+                fanLp += aFan * (pink(w) - fanLp)
+                val hum = sin(phA) * 0.06 + sin(2 * phA) * 0.035
+                ((hum + fanBrown * 1.5f + fanLp * 0.5f) * (1.0 + 0.06 * sin(phB))).toFloat()
             }
             NoiseKind.Green -> {
                 val y = bpB0 * w - bpB0 * x2 - bpA1 * y1 - bpA2 * y2

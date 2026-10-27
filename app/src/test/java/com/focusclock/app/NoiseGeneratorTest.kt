@@ -18,7 +18,7 @@ class NoiseGeneratorTest {
 
     @Test fun everyKindStaysAudibleAndNearlyInRange() {
         for (k in NoiseKind.entries) {
-            val x = samples(k)
+            val x = samples(k, 44_100 * 20)
             val level = x.map { abs(it).toDouble() }.average()
             val clipped = x.count { abs(it) > 1f } / x.size.toDouble()
             assertTrue("$k level $level", level in 0.05..0.6)

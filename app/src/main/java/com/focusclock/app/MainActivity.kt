@@ -1,6 +1,20 @@
 package com.focusclock.app
 
 import android.content.Intent
+import android.graphics.Rect
+import android.graphics.Paint
+import androidx.core.content.res.ResourcesCompat
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.Canvas
 import android.media.AudioManager
 import android.os.Bundle
 import android.provider.Settings
@@ -160,71 +174,81 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Everything is sized for a 360dp-wide phone and scaled to the real screen. */
+@Composable
+private fun scale(): Float {
+    val c = LocalConfiguration.current
+    return minOf(c.screenWidthDp, c.screenHeightDp) / 360f
+}
+
+/** Fades whatever is drawn toward transparent, so rows dim gradually as they near the edge of the screen. */
+private fun Modifier.fadeToBottom(from: Float) = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        drawRect(
+            Brush.verticalGradient(0f to Color.Black, from to Color.Black, 1f to Color.Transparent),
+            blendMode = BlendMode.DstIn,
+        )
+    }
+
 @Composable
 private fun Home(playing: NoiseKind?, onStart: () -> Unit, onSettings: () -> Unit, onToggleNoise: (NoiseKind) -> Unit) {
-    Box(Modifier.fillMaxSize().systemBarsPadding()) {
-        BoxWithConstraints(Modifier.fillMaxSize().padding(top = 56.dp)) {
+    val u = scale()
+    Box(Modifier.fillMaxSize().statusBarsPadding()) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(top = (64 * u).dp)) {
             if (maxHeight > maxWidth) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Spacer(Modifier.height(24.dp))
-                    StartButton(onStart)
-                    Spacer(Modifier.height(28.dp))
-                    NoiseList(playing, onToggleNoise, Modifier.weight(1f).fillMaxWidth())
+                    Spacer(Modifier.height((28 * u).dp))
+                    StartButton(u, onStart)
+                    Spacer(Modifier.height((40 * u).dp))
+                    NoiseList(u, playing, onToggleNoise, Modifier.weight(1f).fillMaxWidth())
                 }
             } else {
                 Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { StartButton(onStart) }
-                    NoiseList(playing, onToggleNoise, Modifier.weight(1f).fillMaxSize())
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { StartButton(u, onStart) }
+                    NoiseList(u, playing, onToggleNoise, Modifier.weight(1f).fillMaxSize())
                 }
             }
         }
         Text(
-            "Simple Focus Clock", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Light, letterSpacing = 1.sp,
-            modifier = Modifier.align(Alignment.TopStart).padding(start = 22.dp, top = 18.dp),
+            "Simple Focus Clock", color = Color.White, fontSize = (21 * u).sp, fontWeight = FontWeight.Light, letterSpacing = (1.5 * u).sp,
+            modifier = Modifier.align(Alignment.TopStart).padding(start = (28 * u).dp, top = (22 * u).dp),
         )
         Icon(
             Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White,
-            modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).size(44.dp).clip(CircleShape).clickable(onClick = onSettings).padding(10.dp),
+            modifier = Modifier.align(Alignment.TopEnd).padding((12 * u).dp).size((52 * u).dp)
+                .clip(CircleShape).clickable(onClick = onSettings).padding((10 * u).dp),
         )
     }
 }
 
 @Composable
-private fun StartButton(onClick: () -> Unit) {
-    Box(Modifier.size(156.dp).border(1.dp, Color.White, CircleShape), contentAlignment = Alignment.Center) {
+private fun StartButton(u: Float, onClick: () -> Unit) {
+    Box(Modifier.size((232 * u).dp).border((1.5 * u).dp, Color.White, CircleShape), contentAlignment = Alignment.Center) {
         Box(
-            Modifier.size(132.dp).clip(CircleShape).clickable(onClick = onClick).border(3.dp, Color.White, CircleShape),
+            Modifier.size((196 * u).dp).clip(CircleShape).clickable(onClick = onClick).border((4.5 * u).dp, Color.White, CircleShape),
             contentAlignment = Alignment.Center,
-        ) { Text("Start", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Light, letterSpacing = 1.sp) }
+        ) { Text("Start", color = Color.White, fontSize = (40 * u).sp, fontWeight = FontWeight.Light, letterSpacing = (1.5 * u).sp) }
     }
 }
 
-/** The noises, fading out toward the bottom of the screen. */
+/** The noises. The list runs to the bottom edge of the screen and each row dims as it gets closer to it. */
 @Composable
-private fun NoiseList(playing: NoiseKind?, onToggle: (NoiseKind) -> Unit, modifier: Modifier) {
-    LazyColumn(
-        modifier
-            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-            .drawWithContent {
-                drawContent()
-                drawRect(
-                    Brush.verticalGradient(0f to Color.Black, 0.25f to Color.Black, 0.97f to Color.Transparent),
-                    blendMode = BlendMode.DstIn,
-                )
-            },
-    ) {
+private fun NoiseList(u: Float, playing: NoiseKind?, onToggle: (NoiseKind) -> Unit, modifier: Modifier) {
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    LazyColumn(modifier.fadeToBottom(0.12f), contentPadding = PaddingValues(bottom = navBottom + (60 * u).dp)) {
         items(NoiseKind.entries) { kind ->
             val on = playing == kind
             Row(
-                Modifier.fillMaxWidth().clickable { onToggle(kind) }.padding(horizontal = 40.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().clickable { onToggle(kind) }.padding(horizontal = (46 * u).dp, vertical = (20 * u).dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PlayPause(on, 30.dp) { onToggle(kind) }
-                Spacer(Modifier.width(16.dp))
-                Text(kind.label, color = Color.White, fontSize = 18.sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Light)
+                PlayPause(on, (46 * u).dp) { onToggle(kind) }
+                Spacer(Modifier.width((26 * u).dp))
+                Text(kind.label, color = Color.White, fontSize = (29 * u).sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Light)
             }
         }
-        item { Spacer(Modifier.height(80.dp)) }
     }
 }
 
@@ -232,7 +256,7 @@ private fun NoiseList(playing: NoiseKind?, onToggle: (NoiseKind) -> Unit, modifi
 @Composable
 private fun PlayPause(playing: Boolean, size: Dp, onClick: () -> Unit) {
     Box(
-        Modifier.size(size).clip(CircleShape).clickable(onClick = onClick).border(1.5.dp, Color.White, CircleShape),
+        Modifier.size(size).clip(CircleShape).clickable(onClick = onClick).border(size * 0.055f, Color.White, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         if (playing) {
@@ -248,20 +272,25 @@ private fun PlayPause(playing: Boolean, size: Dp, onClick: () -> Unit) {
 /** White-on-black switch: solid white with a black dot when on, an outline when off. */
 @Composable
 private fun Toggle(checked: Boolean, onChange: (Boolean) -> Unit) {
-    val x by animateDpAsState(if (checked) 18.dp else 0.dp, label = "thumb")
+    val u = scale()
+    val x by animateDpAsState(if (checked) (26 * u).dp else 0.dp, label = "thumb")
     Box(
-        Modifier.size(width = 38.dp, height = 22.dp).clip(CircleShape)
+        Modifier.size(width = (62 * u).dp, height = (36 * u).dp).clip(CircleShape)
             .background(if (checked) Color.White else Color.Black)
-            .border(1.5.dp, Color.White, CircleShape)
+            .border((2.5 * u).dp, Color.White, CircleShape)
             .toggleable(checked, role = Role.Switch, onValueChange = onChange),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.padding(start = 4.dp).offset(x = x).size(12.dp).clip(CircleShape).background(if (checked) Color.Black else Color.White))
+        Box(
+            Modifier.padding(start = (7 * u).dp).offset(x = x).size((20 * u).dp).clip(CircleShape)
+                .background(if (checked) Color.Black else Color.White)
+        )
     }
 }
 
 @Composable
 private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean, onToggleSound: () -> Unit, onExit: () -> Unit) {
+    val u = scale()
     val view = LocalView.current
     var now by remember { mutableStateOf(LocalDateTime.now()) }
     var hint by remember { mutableStateOf(true) }
@@ -308,115 +337,148 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
 
     val h = "%02d".format(if (settings.use24h) now.hour else (now.hour % 12).let { if (it == 0) 12 else it })
     val m = "%02d".format(now.minute)
-    val style = TextStyle(color = Color.White, fontFamily = ClockFonts[settings.fontIndex].family, textAlign = TextAlign.Center)
 
     BoxWithConstraints(
-        Modifier.fillMaxSize().systemBarsPadding().padding(16.dp)
+        Modifier.fillMaxSize().systemBarsPadding().padding((12 * u).dp)
             .combinedClickable(onClick = { touches++ }, onLongClick = onExit),
         contentAlignment = Alignment.Center,
     ) {
         val portrait = maxHeight > maxWidth
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            if (portrait) {
-                Fit(h, style, Modifier.fillMaxWidth().weight(1f))
-                Fit(m, style, Modifier.fillMaxWidth().weight(1f))
-            } else {
-                Fit("$h:$m", style, Modifier.fillMaxWidth().weight(1f))
-            }
+            ClockFace(if (portrait) listOf(h, m) else listOf("$h:$m"), ClockFonts[settings.fontIndex], Modifier.fillMaxWidth().weight(1f))
             if (settings.showDate) {
                 Text(
                     now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.getDefault())),
-                    color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Light,
-                    modifier = Modifier.padding(top = 8.dp),
+                    color = Color.White, fontSize = (26 * u).sp, fontWeight = FontWeight.Light,
+                    modifier = Modifier.padding(vertical = (10 * u).dp),
                 )
             }
         }
         Row(
-            Modifier.align(Alignment.TopCenter).alpha(if (controls) 1f else 0f),
+            Modifier.align(Alignment.TopCenter).padding(top = (14 * u).dp).alpha(if (controls) 1f else 0f),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy((22 * u).dp),
         ) {
-            Text("Focus mode", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Light)
+            Text("Focus mode", color = Color.White, fontSize = (22 * u).sp, fontWeight = FontWeight.Light)
             Toggle(settings.focus) {
                 if (!controls) return@Toggle
                 touches++
                 settings.updateFocus(it)
                 if (it) focus.enter() else focus.exit()
             }
-            PlayPause(playing, 32.dp) { if (controls) { touches++; onToggleSound() } }
+            PlayPause(playing, (46 * u).dp) { if (controls) { touches++; onToggleSound() } }
             Icon(
                 Icons.Filled.Close, contentDescription = "Exit", tint = Color.White,
-                modifier = Modifier.size(36.dp).clip(CircleShape).clickable { if (controls) onExit() }.padding(6.dp),
+                modifier = Modifier.size((48 * u).dp).clip(CircleShape).clickable { if (controls) onExit() }.padding((8 * u).dp),
             )
         }
         Text(
             "Hold the time to exit",
-            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Light,
-            modifier = Modifier.align(Alignment.BottomCenter).alpha(if (hint) 1f else 0f),
+            color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (6 * u).dp).alpha(if (hint) 1f else 0f),
         )
     }
 }
 
-/** One line of text scaled to fill its box. */
+/**
+ * The time as big as it will go. Every digit sits in a cell as wide as the font's widest digit and every line is as
+ * tall as the tallest digit, so "01" and "14" line up column for column, the block is centred, and nothing shifts
+ * between minutes.
+ */
 @Composable
-private fun Fit(text: String, style: TextStyle, modifier: Modifier) {
-    Box(modifier, contentAlignment = Alignment.Center) {
-        BasicText(
-            text, style = style, maxLines = 1,
-            autoSize = TextAutoSize.StepBased(minFontSize = 24.sp, maxFontSize = 600.sp, stepSize = 2.sp),
-        )
+private fun ClockFace(lines: List<String>, font: ClockFont, modifier: Modifier) {
+    val context = LocalContext.current
+    val measurer = rememberTextMeasurer()
+    val paint = remember(font) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = ResourcesCompat.getFont(context, font.res)
+            textSize = 200f
+        }
+    }
+    Canvas(modifier) {
+        val ref = 200f
+        val rowGap = 0.2f * ref
+        fun adv(c: Char) = paint.measureText(c.toString())
+        val digits = ('0'..'9').map { c -> Rect().also { paint.getTextBounds(c.toString(), 0, 1, it) } }
+        val top = digits.minOf { it.top }.toFloat()
+        val bottom = digits.maxOf { it.bottom }.toFloat()
+        val digitCell = ('0'..'9').maxOf { adv(it) }
+        val colonCell = adv(':')
+        fun cell(c: Char) = if (c.isDigit()) digitCell else colonCell
+        fun width(l: String) = l.sumOf { cell(it).toDouble() }.toFloat()
+        val rowH = bottom - top
+        val wRef = lines.maxOf { width(it) }
+        val hRef = lines.size * rowH + (lines.size - 1) * rowGap
+        val k = minOf(size.width * 0.94f / wRef, size.height * 0.96f / hRef)
+        val style = TextStyle(color = Color.White, fontFamily = font.family, fontSize = (ref * k).toSp())
+        var y = (size.height - hRef * k) / 2f
+        lines.forEach { line ->
+            var x = (size.width - width(line) * k) / 2f
+            line.forEach { ch ->
+                val layout = measurer.measure(ch.toString(), style)
+                drawText(layout, topLeft = Offset(x + (cell(ch) - adv(ch)) / 2f * k, y - top * k - layout.firstBaseline))
+                x += cell(ch) * k
+            }
+            y += (rowH + rowGap) * k
+        }
     }
 }
 
 @Composable
 private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrantSilence: () -> Unit, onBack: () -> Unit) {
+    val u = scale()
     BackHandler(onBack = onBack)
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     LazyVerticalGrid(
-        GridCells.Adaptive(130.dp),
-        Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        GridCells.Adaptive((150 * u).dp),
+        Modifier.fillMaxSize().statusBarsPadding().fadeToBottom(0.72f),
+        contentPadding = PaddingValues(start = (25 * u).dp, end = (25 * u).dp, top = (36 * u).dp, bottom = navBottom + (80 * u).dp),
+        horizontalArrangement = Arrangement.spacedBy((12 * u).dp),
+        verticalArrangement = Arrangement.spacedBy((12 * u).dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
-            Column(Modifier.padding(top = 20.dp)) {
+            Column {
                 ToggleRow("Focus mode", settings.focus, settings::updateFocus)
                 if (settings.focus && !canSilence) {
                     Text(
                         "Allow Do Not Disturb to silence notifications",
-                        color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Light, textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.clickable(onClick = onGrantSilence).padding(vertical = 6.dp),
+                        color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light, textDecoration = TextDecoration.Underline,
+                        modifier = Modifier.clickable(onClick = onGrantSilence).padding(vertical = (8 * u).dp),
                     )
                 }
                 ToggleRow("Show date", settings.showDate, settings::updateShowDate)
                 ToggleRow("24-hour time", settings.use24h, settings::updateUse24h)
-                Text("Font", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Light, modifier = Modifier.padding(top = 18.dp, bottom = 6.dp))
+                Text(
+                    "Font", color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
+                    modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp),
+                )
             }
         }
         itemsIndexed(ClockFonts) { i, f ->
             val selected = i == settings.fontIndex
             Box(
-                Modifier.fillMaxWidth().height(64.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(if (selected) 2.dp else 1.dp, Color.White.copy(alpha = if (selected) 1f else 0.45f), RoundedCornerShape(12.dp))
+                Modifier.fillMaxWidth().height((78 * u).dp)
+                    .clip(RoundedCornerShape((18 * u).dp))
+                    .border(((if (selected) 3.5 else 1.2) * u).dp, Color.White, RoundedCornerShape((18 * u).dp))
                     .clickable { settings.updateFontIndex(i) },
                 contentAlignment = Alignment.Center,
             ) {
                 BasicText(
                     "10:42", maxLines = 1,
-                    style = TextStyle(color = Color.White.copy(alpha = if (selected) 1f else 0.6f), fontFamily = f.family, textAlign = TextAlign.Center),
-                    autoSize = TextAutoSize.StepBased(minFontSize = 12.sp, maxFontSize = 34.sp),
-                    modifier = Modifier.padding(horizontal = 8.dp),
+                    style = TextStyle(color = Color.White, fontFamily = f.family, textAlign = TextAlign.Center),
+                    autoSize = TextAutoSize.StepBased(minFontSize = 12.sp, maxFontSize = (40 * u).sp),
+                    modifier = Modifier.padding(horizontal = (10 * u).dp),
                 )
             }
         }
-        item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(24.dp)) }
     }
 }
 
 @Composable
 private fun ToggleRow(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Light, modifier = Modifier.weight(1f))
+    val u = scale()
+    Row(Modifier.fillMaxWidth().padding(vertical = (20 * u).dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.weight(1f))
         Toggle(value, onChange)
     }
 }

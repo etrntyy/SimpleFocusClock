@@ -8,7 +8,7 @@ import androidx.compose.ui.text.font.FontWeight
 
 /** The clock faces offered in Settings. Variable fonts are pinned to [weight]; static ones ignore it. */
 @OptIn(ExperimentalTextApi::class)
-class ClockFont(res: Int, weight: Int = 400) {
+class ClockFont(val res: Int, weight: Int = 400) {
     val family = FontFamily(
         Font(res, FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
     )
