@@ -306,7 +306,7 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
         }
     }
 
-    val h = if (settings.use24h) "%02d".format(now.hour) else (now.hour % 12).let { if (it == 0) 12 else it }.toString()
+    val h = "%02d".format(if (settings.use24h) now.hour else (now.hour % 12).let { if (it == 0) 12 else it })
     val m = "%02d".format(now.minute)
     val style = TextStyle(color = Color.White, fontFamily = ClockFonts[settings.fontIndex].family, textAlign = TextAlign.Center)
 
