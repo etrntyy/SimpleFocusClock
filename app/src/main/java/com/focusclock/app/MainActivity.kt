@@ -1,6 +1,14 @@
 package com.focusclock.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.SystemClock
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import android.graphics.Rect
 import android.graphics.Paint
 import androidx.core.content.res.ResourcesCompat
@@ -21,6 +29,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
@@ -57,6 +66,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -66,23 +76,31 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -93,25 +111,59 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private enum class Screen { HOME, CLOCK, SETTINGS }
+private const val CREDITS = "Sound recordings from Wikimedia Commons. Campfire by Glaneur de sons (CC BY 3.0), fan by Gravity Sound (CC BY 4.0). Full credits on GitHub."
+
+private enum class Screen { HOME, CLOCK, SETTINGS, STATS, TOOLS, TIMER_SET, TIMER, STOPWATCH, ALARMS }
 
 class MainActivity : ComponentActivity() {
     private lateinit var settings: ClockSettings
     private lateinit var focus: Focus
-    private val noise = NoisePlayer()
+    private lateinit var log: FocusLog
+    private lateinit var schedule: Schedule
+    private var stopwatch by mutableStateOf(Stopwatch())
+    private var toneResult: ((String) -> Unit)? = null
+    private val noise by lazy { NoisePlayer(applicationContext) }
     private var screen by mutableStateOf(Screen.HOME)
     private var permissionTick by mutableStateOf(0)
     private var playing by mutableStateOf<NoiseKind?>(null)
     private var lastNoise = NoiseKind.White
+
+    // The system's own folder picker, then Android's Do Not Disturb page: shown once, on the first launch.
+    private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let(log::chooseFolder)
+        if (!settings.onboarded) {
+            settings.onboarded = true
+            if (!focus.canSilence) startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+        }
+    }
+
+    private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    // The system's own sound picker for an alarm.
+    private val pickTone = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        if (r.resultCode == RESULT_OK) {
+            val uri = r.data?.let { IntentCompat.getParcelableExtra(it, RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java) }
+            toneResult?.invoke(uri?.toString().orEmpty())
+        }
+        toneResult = null
+    }
+
+    /** The screens where the phone stays awake, pinned in focus mode, and the time counts as focus. */
+    private val immersive get() = screen == Screen.CLOCK || screen == Screen.TIMER || screen == Screen.STOPWATCH
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         settings = ClockSettings(this)
         focus = Focus(this)
+        log = FocusLog(this)
+        schedule = Schedule.get(this)
+        schedule.reschedule()
+        showOverLock(intent)
         // The noise plays on the alarm stream so alarms-only Do Not Disturb doesn't mute it.
         volumeControlStream = AudioManager.STREAM_ALARM
         setContent {
@@ -120,8 +172,14 @@ class MainActivity : ComponentActivity() {
                     when (screen) {
                         Screen.HOME -> Home(
                             playing = playing,
+                            todayMinutes = remember(log.sessions, screen) {
+                                FocusStats.report(Period.Day, log.sessions, System.currentTimeMillis(), ZoneId.systemDefault()).totalMinutes
+                            },
+                            dailyTarget = settings.targetDaily,
                             onStart = ::start,
                             onSettings = { screen = Screen.SETTINGS },
+                            onStats = { screen = Screen.STATS },
+                            onTools = { screen = Screen.TOOLS },
                             onToggleNoise = ::toggleNoise,
                         )
                         Screen.CLOCK -> ClockScreen(
@@ -130,6 +188,7 @@ class MainActivity : ComponentActivity() {
                             playing = playing != null,
                             onToggleSound = { toggleNoise(playing ?: lastNoise) },
                             onExit = ::stop,
+                            onBeat = log::beat,
                         )
                         Screen.SETTINGS -> SettingsScreen(
                             settings = settings,
@@ -137,13 +196,60 @@ class MainActivity : ComponentActivity() {
                             onGrantSilence = { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) },
                             onBack = { screen = Screen.HOME },
                         )
+                        Screen.STATS -> StatsScreen(
+                            log = log,
+                            settings = settings,
+                            onChooseFolder = { pickFolder.launch(null) },
+                            onBack = { screen = Screen.HOME },
+                        )
+                        Screen.TOOLS -> ToolsScreen(
+                            schedule = schedule,
+                            stopwatch = stopwatch,
+                            use24h = settings.use24h,
+                            onTimer = { if (schedule.timer != null) enter(Screen.TIMER) else screen = Screen.TIMER_SET },
+                            onStopwatch = { enter(Screen.STOPWATCH) },
+                            onAlarms = { screen = Screen.ALARMS },
+                            onBack = { screen = Screen.HOME },
+                        )
+                        Screen.TIMER_SET -> TimerSetupScreen(
+                            onStart = { ms ->
+                                ensureNotifications()
+                                schedule.startTimer(ms)
+                                enter(Screen.TIMER)
+                            },
+                            onBack = { screen = Screen.TOOLS },
+                        )
+                        Screen.TIMER -> {
+                            ImmersiveEffects(settings, focus, onExit = { leave(Screen.TOOLS) })
+                            TimerScreen(settings, schedule, onExit = { leave(Screen.TOOLS) })
+                        }
+                        Screen.STOPWATCH -> {
+                            ImmersiveEffects(settings, focus, onExit = { leave(Screen.TOOLS) })
+                            StopwatchScreen(settings, stopwatch, onChange = { stopwatch = it }, onExit = { leave(Screen.TOOLS) })
+                        }
+                        Screen.ALARMS -> AlarmsScreen(
+                            schedule = schedule,
+                            use24h = settings.use24h,
+                            onPickTone = ::chooseTone,
+                            onSaved = ::ensureNotifications,
+                            onBack = { screen = Screen.TOOLS },
+                        )
                     }
+                    RingState.banner?.let { ReminderBanner(it, settings.use24h, onSnooze = { schedule.snooze(it, it.snooze); RingState.banner = null }, onDismiss = { RingState.banner = null }) }
+                    RingState.ringing?.let { RingingScreen(it, settings.use24h, onStop = { RingService.stop(this@MainActivity) }, onSnooze = { RingService.snooze(this@MainActivity) }) }
                 }
             }
         }
         lifecycle.addObserver(LifecycleEventObserver { _, e ->
-            if (e == Lifecycle.Event.ON_RESUME) permissionTick++
+            when (e) {
+                Lifecycle.Event.ON_RESUME -> permissionTick++
+                // Focus time only counts while the clock, timer or stopwatch is on screen.
+                Lifecycle.Event.ON_STOP -> { RingState.visible = false; if (immersive) log.end() }
+                Lifecycle.Event.ON_START -> { RingState.visible = true; if (immersive) log.begin() }
+                else -> Unit
+            }
         })
+        if (!settings.onboarded) pickFolder.launch(null)
     }
 
     private fun toggleNoise(kind: NoiseKind) {
@@ -157,17 +263,55 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun start() {
-        screen = Screen.CLOCK
+    private fun start() = enter(Screen.CLOCK)
+
+    private fun stop() = leave(Screen.HOME)
+
+    private fun enter(next: Screen) {
+        val wasImmersive = immersive
+        screen = next
+        if (wasImmersive) return
+        log.begin()
         if (settings.focus) focus.enter()
     }
 
-    private fun stop() {
+    private fun leave(to: Screen) {
+        log.end()
         focus.exit()
-        screen = Screen.HOME
+        screen = to
+    }
+
+    private fun ensureNotifications() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun chooseTone(current: String, result: (String) -> Unit) {
+        toneResult = result
+        pickTone.launch(
+            Intent(RingtoneManager.ACTION_RINGTONE_PICKER)
+                .putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                .putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                .putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, current.takeIf { it.isNotEmpty() }?.let(Uri::parse)),
+        )
+    }
+
+    /** An alarm that opens the app lights the screen and shows over the lock screen. */
+    private fun showOverLock(i: Intent?) {
+        val ring = i?.getBooleanExtra("ring", false) == true
+        setShowWhenLocked(ring)
+        setTurnScreenOn(ring)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        showOverLock(intent)
     }
 
     override fun onDestroy() {
+        log.end()
         noise.stop()
         focus.exit()
         super.onDestroy()
@@ -176,13 +320,13 @@ class MainActivity : ComponentActivity() {
 
 /** Everything is sized for a 360dp-wide phone and scaled to the real screen. */
 @Composable
-private fun scale(): Float {
+internal fun scale(): Float {
     val c = LocalConfiguration.current
     return minOf(c.screenWidthDp, c.screenHeightDp) / 360f
 }
 
 /** Fades whatever is drawn toward transparent, so rows dim gradually as they near the edge of the screen. */
-private fun Modifier.fadeToBottom(from: Float) = this
+internal fun Modifier.fadeToBottom(from: Float) = this
     .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
     .drawWithContent {
         drawContent()
@@ -193,20 +337,20 @@ private fun Modifier.fadeToBottom(from: Float) = this
     }
 
 @Composable
-private fun Home(playing: NoiseKind?, onStart: () -> Unit, onSettings: () -> Unit, onToggleNoise: (NoiseKind) -> Unit) {
+private fun Home(playing: NoiseKind?, todayMinutes: Double, dailyTarget: Int, onStart: () -> Unit, onSettings: () -> Unit, onStats: () -> Unit, onTools: () -> Unit, onToggleNoise: (NoiseKind) -> Unit) {
     val u = scale()
     Box(Modifier.fillMaxSize().statusBarsPadding()) {
         BoxWithConstraints(Modifier.fillMaxSize().padding(top = (64 * u).dp)) {
             if (maxHeight > maxWidth) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
                     Spacer(Modifier.height((28 * u).dp))
-                    StartButton(u, onStart)
+                    StartButton(u, todayMinutes, dailyTarget, onStart)
                     Spacer(Modifier.height((40 * u).dp))
                     NoiseList(u, playing, onToggleNoise, Modifier.weight(1f).fillMaxWidth())
                 }
             } else {
                 Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { StartButton(u, onStart) }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { StartButton(u, todayMinutes, dailyTarget, onStart) }
                     NoiseList(u, playing, onToggleNoise, Modifier.weight(1f).fillMaxSize())
                 }
             }
@@ -220,33 +364,81 @@ private fun Home(playing: NoiseKind?, onStart: () -> Unit, onSettings: () -> Uni
             modifier = Modifier.align(Alignment.TopEnd).padding((12 * u).dp).size((52 * u).dp)
                 .clip(CircleShape).clickable(onClick = onSettings).padding((10 * u).dp),
         )
+        StatsIcon(u, onStats, Modifier.align(Alignment.TopEnd).padding(top = (64 * u).dp, end = (12 * u).dp))
+        ToolsIcon(onTools, Modifier.align(Alignment.TopEnd).padding(top = (116 * u).dp, end = (12 * u).dp))
     }
 }
 
+/** Three rising bars, drawn in the same white as the gear above it. */
 @Composable
-private fun StartButton(u: Float, onClick: () -> Unit) {
-    Box(Modifier.size((232 * u).dp).border((1.5 * u).dp, Color.White, CircleShape), contentAlignment = Alignment.Center) {
-        Box(
-            Modifier.size((196 * u).dp).clip(CircleShape).clickable(onClick = onClick).border((4.5 * u).dp, Color.White, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) { Text("Start", color = Color.White, fontSize = (40 * u).sp, fontWeight = FontWeight.Light, letterSpacing = (1.5 * u).sp) }
+private fun StatsIcon(u: Float, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier.size((52 * u).dp).clip(CircleShape).clickable(onClick = onClick).semantics { contentDescription = "Statistics" },
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Row(Modifier.padding(bottom = (11 * u).dp), horizontalArrangement = Arrangement.spacedBy((3.5 * u).dp), verticalAlignment = Alignment.Bottom) {
+            listOf(14, 30, 21).forEach { Box(Modifier.size(width = (7 * u).dp, height = (it * u).dp).clip(RoundedCornerShape((1.5 * u).dp)).background(Color.White)) }
+        }
     }
 }
 
-/** The noises. The list runs to the bottom edge of the screen and each row dims as it gets closer to it. */
+/**
+ * Two equal rings with a gap between them. Today's focus time fills the whole band, rings and gap, from 3 o'clock
+ * clockwise: coming back round to 3 o'clock is the daily target. Every lap after the first is a slightly greyer white.
+ */
+@Composable
+private fun StartButton(u: Float, todayMinutes: Double, dailyTarget: Int, onClick: () -> Unit) {
+    val laps = if (dailyTarget > 0) FocusStats.laps(todayMinutes / dailyTarget) else emptyList()
+    Box(
+        Modifier.size((232 * u).dp).clip(CircleShape).clickable(onClick = onClick).drawBehind {
+            val ring = 4.5f * u * density
+            val outer = 116f * u * density
+            val inner = 98f * u * density
+            val c = center
+            drawCircle(Color.White, radius = outer - ring / 2, center = c, style = Stroke(ring))
+            drawCircle(Color.White, radius = inner - ring / 2, center = c, style = Stroke(ring))
+            // The band runs from the inner ring's inside edge to the outer ring's outside edge.
+            val width = outer - (inner - ring)
+            val r = outer - width / 2
+            laps.forEachIndexed { k, sweep ->
+                val g = FocusStats.lapGrey(k)
+                drawArc(
+                    Color(g, g, g), startAngle = 0f, sweepAngle = 360f * sweep, useCenter = false,
+                    topLeft = Offset(c.x - r, c.y - r), size = Size(2 * r, 2 * r), style = Stroke(width),
+                )
+            }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("Start", color = Color.White, fontSize = (40 * u).sp, fontWeight = FontWeight.Light, letterSpacing = (1.5 * u).sp)
+        if (todayMinutes >= 1) {
+            Text(
+                FocusStats.duration(todayMinutes), color = Color.White, fontSize = (21 * u).sp, fontWeight = FontWeight.Light,
+                modifier = Modifier.offset(y = (42 * u).dp),
+            )
+        }
+    }
+}
+
+/**
+ * The noises. Rows dim as they near the bottom edge, and the list can be scrolled until the last row sits where the first
+ * one starts, in full brightness.
+ */
 @Composable
 private fun NoiseList(u: Float, playing: NoiseKind?, onToggle: (NoiseKind) -> Unit, modifier: Modifier) {
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    LazyColumn(modifier.fadeToBottom(0.12f), contentPadding = PaddingValues(bottom = navBottom + (60 * u).dp)) {
-        items(NoiseKind.entries) { kind ->
-            val on = playing == kind
-            Row(
-                Modifier.fillMaxWidth().clickable { onToggle(kind) }.padding(horizontal = (46 * u).dp, vertical = (20 * u).dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                PlayPause(on, (46 * u).dp) { onToggle(kind) }
-                Spacer(Modifier.width((26 * u).dp))
-                Text(kind.label, color = Color.White, fontSize = (29 * u).sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Light)
+    val rowHeight = (86 * u).dp
+    BoxWithConstraints(modifier) {
+        LazyColumn(Modifier.fillMaxSize().fadeToBottom(0.12f), contentPadding = PaddingValues(bottom = (maxHeight - rowHeight).coerceAtLeast(0.dp))) {
+            items(NoiseKind.entries) { kind ->
+                val on = playing == kind
+                Row(
+                    Modifier.fillMaxWidth().height(rowHeight).clickable { onToggle(kind) }.padding(horizontal = (46 * u).dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PlayPause(on, (46 * u).dp) { onToggle(kind) }
+                    Spacer(Modifier.width((26 * u).dp))
+                    Text(kind.label, color = Color.White, fontSize = (29 * u).sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Light)
+                }
             }
         }
     }
@@ -271,7 +463,7 @@ private fun PlayPause(playing: Boolean, size: Dp, onClick: () -> Unit) {
 
 /** White-on-black switch: solid white with a black dot when on, an outline when off. */
 @Composable
-private fun Toggle(checked: Boolean, onChange: (Boolean) -> Unit) {
+internal fun Toggle(checked: Boolean, onChange: (Boolean) -> Unit) {
     val u = scale()
     val x by animateDpAsState(if (checked) (26 * u).dp else 0.dp, label = "thumb")
     Box(
@@ -288,18 +480,13 @@ private fun Toggle(checked: Boolean, onChange: (Boolean) -> Unit) {
     }
 }
 
+/**
+ * What the clock, timer and stopwatch screens share: the phone stays awake, the system bars are hidden, and if the user
+ * leaves pinned mode with the system gesture the screen falls back out.
+ */
 @Composable
-private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean, onToggleSound: () -> Unit, onExit: () -> Unit) {
-    val u = scale()
+private fun ImmersiveEffects(settings: ClockSettings, focus: Focus, onExit: () -> Unit) {
     val view = LocalView.current
-    var now by remember { mutableStateOf(LocalDateTime.now()) }
-    var hint by remember { mutableStateOf(true) }
-    var controls by remember { mutableStateOf(false) }
-    var touches by remember { mutableStateOf(0) }
-
-    BackHandler(onBack = onExit)
-
-    // The phone never sleeps while the clock is open.
     DisposableEffect(Unit) {
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
@@ -310,13 +497,39 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
     }
-    LaunchedEffect(Unit) {
+    val exit by rememberUpdatedState(onExit)
+    LaunchedEffect(settings.focus) {
+        if (!settings.focus) return@LaunchedEffect
+        var wasPinned = false
+        var missing = 0
+        while (true) {
+            delay(1_000)
+            if (focus.pinned) { wasPinned = true; missing = 0 } else if (wasPinned && ++missing >= 2) { exit(); break }
+        }
+    }
+}
+
+@Composable
+private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean, onToggleSound: () -> Unit, onExit: () -> Unit, onBeat: () -> Unit) {
+    val u = scale()
+    val view = LocalView.current
+    var now by remember { mutableStateOf(LocalDateTime.now()) }
+    var hint by remember { mutableStateOf(true) }
+    var controls by remember { mutableStateOf(false) }
+    var touches by remember { mutableStateOf(0) }
+
+    BackHandler(onBack = onExit)
+    ImmersiveEffects(settings, focus, onExit)
+    LaunchedEffect(settings.showSeconds) {
+        val period = if (settings.showSeconds) 1_000L else 60_000L
         while (true) {
             now = LocalDateTime.now()
-            delay(60_000L - (System.currentTimeMillis() % 60_000L) + 20L)
+            delay(period - (System.currentTimeMillis() % period) + 20L)
         }
     }
     LaunchedEffect(Unit) { delay(4_000); hint = false }
+    // Keeps the session's end current, so a killed app still loses at most half a minute.
+    LaunchedEffect(Unit) { while (true) { delay(30_000); onBeat() } }
     // Controls appear on touch and fade away on their own.
     LaunchedEffect(touches) {
         if (touches == 0) return@LaunchedEffect
@@ -324,19 +537,9 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
         delay(3_000)
         controls = false
     }
-    // If the user leaves pinned mode with the system gesture, fall back to the home screen.
-    LaunchedEffect(settings.focus) {
-        if (!settings.focus) return@LaunchedEffect
-        var wasPinned = false
-        var missing = 0
-        while (true) {
-            delay(1_000)
-            if (focus.pinned) { wasPinned = true; missing = 0 } else if (wasPinned && ++missing >= 2) { onExit(); break }
-        }
-    }
-
     val h = "%02d".format(if (settings.use24h) now.hour else (now.hour % 12).let { if (it == 0) 12 else it })
     val m = "%02d".format(now.minute)
+    val sec = "%02d".format(now.second)
 
     BoxWithConstraints(
         Modifier.fillMaxSize().systemBarsPadding().padding((12 * u).dp)
@@ -345,7 +548,11 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
     ) {
         val portrait = maxHeight > maxWidth
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            ClockFace(if (portrait) listOf(h, m) else listOf("$h:$m"), ClockFonts[settings.fontIndex], Modifier.fillMaxWidth().weight(1f))
+            ClockFace(
+                if (portrait) listOfNotNull(h, m, sec.takeIf { settings.showSeconds }) else listOf(if (settings.showSeconds) "$h:$m:$sec" else "$h:$m"),
+                ClockFonts[settings.fontIndex],
+                Modifier.fillMaxWidth().weight(1f),
+            )
             if (settings.showDate) {
                 Text(
                     now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.getDefault())),
@@ -386,7 +593,7 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
  * between minutes.
  */
 @Composable
-private fun ClockFace(lines: List<String>, font: ClockFont, modifier: Modifier) {
+internal fun ClockFace(lines: List<String>, font: ClockFont, modifier: Modifier) {
     val context = LocalContext.current
     val measurer = rememberTextMeasurer()
     val paint = remember(font) {
@@ -428,47 +635,67 @@ private fun ClockFace(lines: List<String>, font: ClockFont, modifier: Modifier) 
 private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrantSilence: () -> Unit, onBack: () -> Unit) {
     val u = scale()
     BackHandler(onBack = onBack)
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    LazyVerticalGrid(
-        GridCells.Adaptive((150 * u).dp),
-        Modifier.fillMaxSize().statusBarsPadding().fadeToBottom(0.72f),
-        contentPadding = PaddingValues(start = (25 * u).dp, end = (25 * u).dp, top = (36 * u).dp, bottom = navBottom + (80 * u).dp),
-        horizontalArrangement = Arrangement.spacedBy((12 * u).dp),
-        verticalArrangement = Arrangement.spacedBy((12 * u).dp),
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            Column {
-                ToggleRow("Focus mode", settings.focus, settings::updateFocus)
-                if (settings.focus && !canSilence) {
+    val top = (36 * u).dp
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val creditsStyle = LocalTextStyle.current.merge(TextStyle(fontSize = (14 * u).sp, fontWeight = FontWeight.Light))
+    BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding()) {
+        // The list can be scrolled until the last item sits where the first one starts, in full brightness.
+        val creditsHeight = with(density) {
+            measurer.measure(CREDITS, creditsStyle, constraints = Constraints(maxWidth = (maxWidth - (50 * u).dp).roundToPx())).size.height.toDp()
+        }
+        LazyVerticalGrid(
+            GridCells.Adaptive((150 * u).dp),
+            Modifier.fillMaxSize().fadeToBottom(0.72f),
+            contentPadding = PaddingValues(start = (25 * u).dp, end = (25 * u).dp, top = top, bottom = (maxHeight - top - creditsHeight).coerceAtLeast(0.dp)),
+            horizontalArrangement = Arrangement.spacedBy((12 * u).dp),
+            verticalArrangement = Arrangement.spacedBy((12 * u).dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Column {
+                    ToggleRow("Focus mode", settings.focus, settings::updateFocus)
+                    if (settings.focus && !canSilence) {
+                        Text(
+                            "Allow Do Not Disturb to silence notifications",
+                            color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light, textDecoration = TextDecoration.Underline,
+                            modifier = Modifier.clickable(onClick = onGrantSilence).padding(vertical = (8 * u).dp),
+                        )
+                    }
+                    ToggleRow("Show date", settings.showDate, settings::updateShowDate)
+                    ToggleRow("24-hour time", settings.use24h, settings::updateUse24h)
+                    ToggleRow("Show seconds", settings.showSeconds, settings::updateShowSeconds)
                     Text(
-                        "Allow Do Not Disturb to silence notifications",
-                        color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light, textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.clickable(onClick = onGrantSilence).padding(vertical = (8 * u).dp),
+                        "Focus targets", color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
+                        modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp),
+                    )
+                    listOf("Daily" to Period.Day, "Weekly" to Period.Week, "Monthly" to Period.Month, "Yearly" to Period.Year).forEach { (label, period) ->
+                        TargetRow(label, settings.target(period), targetStep(period)) { settings.updateTarget(period, it) }
+                    }
+                    Text(
+                        "Font", color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
+                        modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp),
                     )
                 }
-                ToggleRow("Show date", settings.showDate, settings::updateShowDate)
-                ToggleRow("24-hour time", settings.use24h, settings::updateUse24h)
-                Text(
-                    "Font", color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
-                    modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp),
-                )
             }
-        }
-        itemsIndexed(ClockFonts) { i, f ->
-            val selected = i == settings.fontIndex
-            Box(
-                Modifier.fillMaxWidth().height((78 * u).dp)
-                    .clip(RoundedCornerShape((18 * u).dp))
-                    .border(((if (selected) 3.5 else 1.2) * u).dp, Color.White, RoundedCornerShape((18 * u).dp))
-                    .clickable { settings.updateFontIndex(i) },
-                contentAlignment = Alignment.Center,
-            ) {
-                BasicText(
-                    "10:42", maxLines = 1,
-                    style = TextStyle(color = Color.White, fontFamily = f.family, textAlign = TextAlign.Center),
-                    autoSize = TextAutoSize.StepBased(minFontSize = 12.sp, maxFontSize = (40 * u).sp),
-                    modifier = Modifier.padding(horizontal = (10 * u).dp),
-                )
+            itemsIndexed(ClockFonts) { i, f ->
+                val selected = i == settings.fontIndex
+                Box(
+                    Modifier.fillMaxWidth().height((78 * u).dp)
+                        .clip(RoundedCornerShape((18 * u).dp))
+                        .border(((if (selected) 3.5 else 1.2) * u).dp, Color.White, RoundedCornerShape((18 * u).dp))
+                        .clickable { settings.updateFontIndex(i) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    BasicText(
+                        if (settings.showSeconds) "10:42:07" else "10:42", maxLines = 1,
+                        style = TextStyle(color = Color.White, fontFamily = f.family, textAlign = TextAlign.Center),
+                        autoSize = TextAutoSize.StepBased(minFontSize = 12.sp, maxFontSize = (40 * u).sp),
+                        modifier = Modifier.padding(horizontal = (10 * u).dp),
+                    )
+                }
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Text(CREDITS, color = Color.White, fontSize = (14 * u).sp, fontWeight = FontWeight.Light)
             }
         }
     }
@@ -480,5 +707,33 @@ private fun ToggleRow(label: String, value: Boolean, onChange: (Boolean) -> Unit
     Row(Modifier.fillMaxWidth().padding(vertical = (20 * u).dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.weight(1f))
         Toggle(value, onChange)
+    }
+}
+
+/** A target with a minus and a plus: it steps by [step] minutes and reads "Off" at zero. */
+@Composable
+private fun TargetRow(label: String, minutes: Int, step: Int, onChange: (Int) -> Unit) {
+    val u = scale()
+    Row(Modifier.fillMaxWidth().padding(vertical = (20 * u).dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.weight(1f))
+        StepButton(plus = false) { onChange(minutes - step) }
+        Text(
+            FocusStats.target(minutes), color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
+            textAlign = TextAlign.Center, maxLines = 1, softWrap = false, modifier = Modifier.width((96 * u).dp),
+        )
+        StepButton(plus = true) { onChange(minutes + step) }
+    }
+}
+
+@Composable
+internal fun StepButton(plus: Boolean, onClick: () -> Unit) {
+    val u = scale()
+    Box(
+        Modifier.size((40 * u).dp).clip(CircleShape).clickable(onClick = onClick).border((2.5 * u).dp, Color.White, CircleShape)
+            .semantics { contentDescription = if (plus) "Increase" else "Decrease" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(width = (16 * u).dp, height = (2.5 * u).dp).background(Color.White))
+        if (plus) Box(Modifier.size(width = (2.5 * u).dp, height = (16 * u).dp).background(Color.White))
     }
 }
