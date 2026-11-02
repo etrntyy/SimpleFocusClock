@@ -246,8 +246,7 @@ internal fun ToolsScreen(schedule: Schedule, stopwatch: Stopwatch, use24h: Boole
 private fun ToolRow(title: String, subtitle: String, onClick: () -> Unit, icon: @Composable () -> Unit) {
     val u = scale()
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = (28 * u).dp, vertical = (22 * u).dp)
-            .drawBehind { drawLine(Color.White.copy(alpha = 0.25f), Offset(0f, size.height), Offset(size.width, size.height), 1.2f * u * density) },
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = (28 * u).dp, vertical = (22 * u).dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width((50 * u).dp), contentAlignment = Alignment.CenterStart) { icon() }
@@ -443,7 +442,7 @@ internal fun StopwatchScreen(settings: ClockSettings, stopwatch: Stopwatch, focu
                 LazyColumn(Modifier.fillMaxSize().fadeToBottom(0.5f), contentPadding = PaddingValues(bottom = (maxHeight - rowHeight).coerceAtLeast(0.dp))) {
                     items(splits.indices.reversed().toList()) { i ->
                         Row(
-                            Modifier.fillMaxWidth().height(rowHeight).drawBehind { drawLine(Color.White.copy(alpha = 0.2f), Offset(0f, size.height), Offset(size.width, size.height), 1.2f * u * density) },
+                            Modifier.fillMaxWidth().height(rowHeight),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Label("Lap ${i + 1}", 22f, Modifier.weight(1f), dim = true)
@@ -617,8 +616,7 @@ private fun TextLine(value: String, hint: String, fontSize: Float, onChange: (St
 private fun FieldRow(label: String, onClick: (() -> Unit)? = null, trailing: @Composable () -> Unit) {
     val u = scale()
     Row(
-        Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier).padding(vertical = (14 * u).dp)
-            .drawBehind { drawLine(Color.White.copy(alpha = 0.25f), Offset(0f, size.height), Offset(size.width, size.height), 1.2f * u * density) },
+        Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier).padding(vertical = (14 * u).dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Label(label, 22f, Modifier.weight(1f), dim = true)

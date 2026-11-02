@@ -119,35 +119,69 @@ internal fun FractalsIcon(onClick: () -> Unit, modifier: Modifier = Modifier) {
     ) { HilbertIcon((35 * u).dp) }
 }
 
+/** A short text form of a choice, for saving which fractal is the clock's background. */
+internal fun FractalChoice.key(): String = when (this) {
+    FractalChoice.Shuffle -> "shuffle"
+    is FractalChoice.OfShader -> "shader:$id"
+    is FractalChoice.OfLine -> "line:${kind.name}"
+}
+
+internal fun parseFractalChoice(key: String): FractalChoice? = when {
+    key == "shuffle" -> FractalChoice.Shuffle
+    key.startsWith("shader:") -> FractalChoice.OfShader(key.removePrefix("shader:")).takeIf { s -> ShaderCatalog.shaders.any { it.id == s.id } }
+    key.startsWith("line:") -> LineFractal.entries.firstOrNull { it.name == key.removePrefix("line:") }?.let { FractalChoice.OfLine(it) }
+    else -> null
+}
+
+/**
+ * Every fractal, with a switch on the right that makes it the clock's background. Tapping a row plays it on the whole
+ * screen. Only one can be the background; turning it off puts the clock back to how it was.
+ */
 @Composable
-internal fun FractalsScreen(mono: Boolean, onMono: (Boolean) -> Unit, onPick: (FractalChoice) -> Unit, onBack: () -> Unit) {
+internal fun FractalsScreen(mono: Boolean, onMono: (Boolean) -> Unit, background: String, onBackground: (String) -> Unit, onPick: (FractalChoice) -> Unit, onBack: () -> Unit) {
     val u = scale()
     BackHandler(onBack = onBack)
     @Composable
     fun row(title: String, blurb: String, choice: FractalChoice) {
         Row(
-            Modifier.fillMaxWidth().clickable { onPick(choice) }.padding(horizontal = (28 * u).dp, vertical = (20 * u).dp)
-                .drawBehind { drawLine(Color.White.copy(alpha = 0.25f), Offset(0f, size.height), Offset(size.width, size.height), 1.2f * u * density) },
+            Modifier.fillMaxWidth().clickable { onPick(choice) }.padding(horizontal = (28 * u).dp, vertical = (20 * u).dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f).padding(end = (14 * u).dp)) {
                 Text(title, color = Color.White, fontSize = (27 * u).sp, fontWeight = FontWeight.Light)
                 Text(blurb, color = Color.White.copy(alpha = 0.6f), fontSize = (16 * u).sp, fontWeight = FontWeight.Light)
             }
-            Icon(Icons.Filled.KeyboardArrowRight, contentDescription = null, tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size((32 * u).dp))
+            Toggle(background == choice.key()) { onBackground(if (it) choice.key() else "") }
         }
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         Header("Fractals", onBack)
         Spacer(Modifier.height((16 * u).dp))
         Box(Modifier.padding(horizontal = (28 * u).dp)) {
-            Segmented(listOf("Colour", "Black and white"), if (mono) 1 else 0) { onMono(it == 1) }
+            Segmented(listOf("Colour", "Monochrome"), if (mono) 1 else 0) { onMono(it == 1) }
         }
         Spacer(Modifier.height((10 * u).dp))
         row("Shuffle", "Every fractal in turn, a minute each", FractalChoice.Shuffle)
         ShaderCatalog.shaders.forEach { row(it.name, it.blurb, FractalChoice.OfShader(it.id)) }
-        LineFractal.entries.forEach { row(it.label, it.blurb + ". Always black and white", FractalChoice.OfLine(it)) }
+        LineFractal.entries.forEach { row(it.label, it.blurb + ". Always monochrome", FractalChoice.OfLine(it)) }
         Spacer(Modifier.height((40 * u).dp))
+    }
+}
+
+/** A fractal as the clock's background: no touches of its own, so the clock keeps its. */
+@Composable
+internal fun FractalBackground(choice: FractalChoice, mono: Boolean, light: Boolean) {
+    when (choice) {
+        is FractalChoice.OfLine -> LineView(choice.kind, null)
+        else -> ShaderView(
+            RenderConfig(
+                shaderId = (choice as? FractalChoice.OfShader)?.id ?: ShaderCatalog.shaders.first().id,
+                palette = if (mono) ShaderCatalog.MONO else -1,
+                cycleMinutes = if (choice is FractalChoice.Shuffle) 1 else 0,
+                invert = mono && light,
+            ),
+            null,
+        )
     }
 }
 
@@ -182,7 +216,7 @@ internal fun FractalScreen(choice: FractalChoice, mono: Boolean, light: Boolean,
 
 /** A fragment shader drawn on the GPU into its own surface, which can be a fraction of the screen's size to save power. */
 @Composable
-private fun ShaderView(config: RenderConfig, onExit: () -> Unit) {
+private fun ShaderView(config: RenderConfig, onExit: (() -> Unit)?) {
     val context = LocalContext.current
     val renderer = remember { ShaderRenderer(context.assets) }
     val driver = remember { SurfaceDriver(renderer) }
@@ -226,7 +260,7 @@ private fun ShaderView(config: RenderConfig, onExit: () -> Unit) {
             modifier = Modifier.fillMaxSize(),
         )
         // A transparent layer on top takes the touches: a tap nudges the fractal, a drag steers it, a long press leaves.
-        Box(
+        if (onExit != null) Box(
             Modifier.fillMaxSize()
                 .pointerInput(Unit) { detectTapGestures(onTap = { val q = uv(it); renderer.tap(q.x, q.y) }, onLongPress = { onExit() }) }
                 .pointerInput(Unit) {
@@ -243,7 +277,7 @@ private fun ShaderView(config: RenderConfig, onExit: () -> Unit) {
 
 /** The fractals drawn as lines and dots by the app itself. */
 @Composable
-private fun LineView(kind: LineFractal, onExit: () -> Unit) {
+private fun LineView(kind: LineFractal, onExit: (() -> Unit)?) {
     var t by remember(kind) { mutableDoubleStateOf(0.0) }
     LaunchedEffect(kind) {
         val start = withFrameNanos { it }
@@ -252,7 +286,7 @@ private fun LineView(kind: LineFractal, onExit: () -> Unit) {
     val hilbert = remember { FractalMath.hilbert(5) }
     val turns = remember { FractalMath.dragonTurns(11) }
     val chaos = remember(kind) { Chaos() }
-    Canvas(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { onExit() }) }) {
+    Canvas(if (onExit != null) Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { onExit() }) } else Modifier.fillMaxSize()) {
         val frameTime = t
         when (kind) {
             LineFractal.Hilbert -> drawHilbert(hilbert, frameTime)

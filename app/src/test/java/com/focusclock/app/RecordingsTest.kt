@@ -63,3 +63,68 @@ class RecordingsTest {
         for (name in listOf("Glaneur de sons", "Gravity Sound")) assertTrue("README should credit $name", readme.contains(name))
     }
 }
+
+/** Plays [signal] through the splicer for [passes] passes, as the player would, and returns what it plays. */
+private fun streamed(signal: ShortArray, channels: Int, crossfade: Int, estimate: Long, passes: Int): ShortArray {
+    val splicer = LoopSplicer(channels, crossfade, estimate)
+    val played = ArrayList<Short>()
+    val emit = { d: ShortArray, off: Int, len: Int -> for (i in off until off + len) played.add(d[i]) }
+    var skipFirst = 0
+    repeat(passes) {
+        splicer.beginPass()
+        // The decoder hands over chunks of an awkward size.
+        var pos = 0
+        while (pos < signal.size) {
+            val n = minOf(1_000 * channels + 6, signal.size - pos)
+            splicer.feed(signal.copyOfRange(pos, pos + n), emit)
+            pos += n
+        }
+        splicer.endPass(emit)
+        skipFirst++
+    }
+    return played.toShortArray()
+}
+
+class LoopSplicerTest {
+    private val channels = 2
+    private val crossfade = 4_000
+    private val frames = 30_000
+    private val signal = ShortArray(frames * channels) { Random(5).let { r -> (it * 37 % 20_000 - 10_000).toShort() } }
+
+    private fun expected(passes: Int): ShortArray {
+        val loop = Recordings.seamless(Pcm(48_000, channels, signal), crossfade / 48_000.0)
+        val prefix = signal.copyOfRange(0, (frames - crossfade) * channels)
+        var out = prefix
+        repeat(passes) { out += loop }
+        // The last pass ends part way through the loop, in the fade back to its start.
+        return out + loop.copyOfRange(0, crossfade * channels)
+    }
+
+    @Test fun theStreamIsTheRecordingFollowedByTheSeamlessLoopOverAndOver() {
+        // Pass one plays the plain recording up to the fade; every pass after that is the loop.
+        val got = streamed(signal, channels, crossfade, frames.toLong(), 4)
+        val want = expected(3)
+        assertEquals(want.size, got.size)
+        for (i in want.indices) if (want[i] != got[i]) throw AssertionError("differs at sample $i: ${got[i]} instead of ${want[i]}")
+    }
+
+    @Test fun anEstimateOfTheLengthThatIsOffByAFewHundredMillisecondsStillLoopsCleanly() {
+        for (off in listOf(-9_000L, -500L, 700L, 6_000L)) {
+            val got = streamed(signal, channels, crossfade, frames + off, 3)
+            // From the second pass on, the loop repeats exactly: find one period and check the next matches it.
+            val period = (frames - crossfade) * channels
+            val tailStart = got.size - 2 * period
+            assertTrue("estimate off by $off: too short", tailStart >= 0)
+            for (i in 0 until period) {
+                if (got[tailStart + i] != got[tailStart + period + i]) throw AssertionError("estimate off by $off: loop differs at $i")
+            }
+        }
+    }
+
+    @Test fun theFadeIntoTheLoopIsContinuousWithTheSoundBeforeIt() {
+        val got = streamed(signal, channels, crossfade, frames.toLong(), 2)
+        val join = (frames - crossfade) * channels
+        // The first sample of the fade is the last sample before it, so there is no jump.
+        assertEquals(signal[join].toInt(), got[join].toInt())
+    }
+}

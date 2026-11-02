@@ -71,11 +71,11 @@ object ShaderCatalog {
         Palette("Forest", f(.3f, .5f, .3f), f(.3f, .4f, .3f), f(1f, 1f, .8f), f(.2f, 0f, .3f)),
         Palette("Candy", f(.6f, .5f, .6f), f(.4f, .4f, .4f), f(1f, 1f, 1f), f(0f, .4f, .7f)),
         Palette("Gold", f(.5f, .4f, .2f), f(.5f, .4f, .2f), f(1f, 1f, 1f), f(0f, .1f, .2f)),
-        // Equal in every channel, so it only ever makes greys: the black and white versions.
+        // Equal in every channel, so it only ever makes greys: the monochrome versions.
         Palette("Mono", f(.5f, .5f, .5f), f(.5f, .5f, .5f), f(1f, 1f, 1f), f(0f, 0f, 0f)),
     )
 
-    /** The palette index that turns any fractal black and white. */
+    /** The palette index that turns any fractal monochrome. */
     val MONO = palettes.lastIndex
 
     private fun f(a: Float, b: Float, c: Float) = floatArrayOf(a, b, c)

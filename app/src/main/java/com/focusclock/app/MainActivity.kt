@@ -70,6 +70,9 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -131,15 +134,6 @@ class MainActivity : ComponentActivity() {
     private var playing by mutableStateOf<NoiseKind?>(null)
     private var lastNoise = NoiseKind.White
 
-    // The system's own folder picker, then Android's Do Not Disturb page: shown once, on the first launch.
-    private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let(log::chooseFolder)
-        if (!settings.onboarded) {
-            settings.onboarded = true
-            if (!focus.canSilence) startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
-        }
-    }
-
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     // The system's own sound picker for an alarm.
@@ -167,14 +161,20 @@ class MainActivity : ComponentActivity() {
         volumeControlStream = AudioManager.STREAM_ALARM
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(background = Color.Black, surface = Color.Black)) {
+              // Text is centred on its letters, not on the extra space fonts leave above and below them.
+              ProvideTextStyle(TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false), lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both))) {
                 val systemDark = isSystemInDarkTheme()
                 val light = isLight(settings.appTheme, settings.clockTheme, systemDark, immersive)
+                val appLight = isLight(settings.appTheme, settings.clockTheme, systemDark, false)
+                val iconContext = LocalContext.current
+                LaunchedEffect(appLight) { LauncherIcon.apply(iconContext, appLight) }
                 SideEffect {
                     window.setBackgroundDrawable(ColorDrawable(if (light) android.graphics.Color.WHITE else android.graphics.Color.BLACK))
                     WindowCompat.getInsetsController(window, window.decorView).apply { isAppearanceLightStatusBars = light; isAppearanceLightNavigationBars = light }
                 }
                 // The GPU fractals flip themselves (black and white ones only), so the colour ones are never inverted.
-                val flipHere = light && !(screen == Screen.FRACTAL && fractal.onGpu)
+                val gpuBackground = screen == Screen.CLOCK && parseFractalChoice(settings.fractalBackground)?.onGpu == true
+                val flipHere = light && !(screen == Screen.FRACTAL && fractal.onGpu) && !gpuBackground
                 Box(Modifier.fillMaxSize().inverted(flipHere).background(Color.Black)) {
                     when (screen) {
                         Screen.HOME -> Home(
@@ -197,6 +197,8 @@ class MainActivity : ComponentActivity() {
                             onToggleSound = { toggleNoise(playing ?: lastNoise) },
                             onExit = ::stop,
                             onBeat = log::beat,
+                            background = parseFractalChoice(settings.fractalBackground),
+                            light = light,
                         )
                         Screen.SETTINGS -> SettingsScreen(
                             settings = settings,
@@ -208,12 +210,13 @@ class MainActivity : ComponentActivity() {
                         Screen.STATS -> StatsScreen(
                             log = log,
                             settings = settings,
-                            onChooseFolder = { pickFolder.launch(null) },
                             onBack = { screen = Screen.HOME },
                         )
                         Screen.FRACTALS -> FractalsScreen(
                             mono = settings.fractalMono,
                             onMono = settings::updateFractalMono,
+                            background = settings.fractalBackground,
+                            onBackground = settings::updateFractalBackground,
                             onPick = { fractal = it; enter(Screen.FRACTAL) },
                             onBack = { screen = Screen.HOME },
                         )
@@ -254,6 +257,7 @@ class MainActivity : ComponentActivity() {
                     RingState.banner?.let { ReminderBanner(it, settings.use24h, onSnooze = { schedule.snooze(it, it.snooze); RingState.banner = null }, onDismiss = { RingState.banner = null }) }
                     RingState.ringing?.let { RingingScreen(it, settings.use24h, onStop = { RingService.stop(this@MainActivity) }, onSnooze = { RingService.snooze(this@MainActivity) }) }
                 }
+              }
             }
         }
         lifecycle.addObserver(LifecycleEventObserver { _, e ->
@@ -265,7 +269,11 @@ class MainActivity : ComponentActivity() {
                 else -> Unit
             }
         })
-        if (!settings.onboarded) pickFolder.launch(null)
+        // The first launch sends the user to Android's own Do Not Disturb page, once.
+        if (!settings.onboarded) {
+            settings.onboarded = true
+            if (!focus.canSilence) startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+        }
     }
 
     private fun toggleNoise(kind: NoiseKind) {
@@ -532,7 +540,10 @@ internal fun ImmersiveEffects(settings: ClockSettings, focus: Focus, onExit: () 
 }
 
 @Composable
-private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean, onToggleSound: () -> Unit, onExit: () -> Unit, onBeat: () -> Unit) {
+private fun ClockScreen(
+    settings: ClockSettings, focus: Focus, playing: Boolean, onToggleSound: () -> Unit, onExit: () -> Unit, onBeat: () -> Unit,
+    background: FractalChoice?, light: Boolean,
+) {
     val u = scale()
     val view = LocalView.current
     var now by remember { mutableStateOf(LocalDateTime.now()) }
@@ -564,8 +575,15 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
     val m = "%02d".format(now.minute)
     val sec = "%02d".format(now.second)
 
+    val gpuBackground = background?.onGpu == true
+    Box(Modifier.fillMaxSize()) {
+    if (background != null) {
+        FractalBackground(background, settings.fractalMono, light)
+        // A soft veil keeps the time readable over a busy fractal.
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+    }
     BoxWithConstraints(
-        Modifier.fillMaxSize().systemBarsPadding().padding((12 * u).dp)
+        Modifier.fillMaxSize().inverted(light && gpuBackground).systemBarsPadding().padding((12 * u).dp)
             .clickable { touches++ },
         contentAlignment = Alignment.Center,
     ) {
@@ -609,6 +627,7 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (6 * u).dp).alpha(if (hint) 1f else 0f),
         )
         PinHint(settings, focus, Modifier.align(Alignment.BottomCenter))
+    }
     }
 }
 
@@ -767,17 +786,12 @@ private fun UpdateRow() {
         UpdateState.Idle -> "Version $installed"
         UpdateState.Checking -> "Checking for a new version…"
         is UpdateState.UpToDate -> "You have the latest version, ${state.version}"
-        is UpdateState.Downloading -> "Downloading ${state.version}, ${state.percent}%"
-        is UpdateState.Installing -> "Installing ${state.version}…"
-        UpdateState.NeedsPermission -> "Allow this app to install updates, then tap Update app again"
+        is UpdateState.Opened -> "Version ${state.version} is downloading in your browser. Open it when it finishes."
         is UpdateState.Failed -> state.reason
     }
     Row(Modifier.fillMaxWidth().padding(vertical = (8 * u).dp), verticalAlignment = Alignment.CenterVertically) {
         Text(status, color = Color.White, fontSize = (19 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.weight(1f).padding(end = (12 * u).dp))
-        PillButton(
-            if (state == UpdateState.NeedsPermission) "Allow" else "Update app", false,
-            { if (state == UpdateState.NeedsPermission) Updater.openPermissionPage(context) else Updater.update(context) },
-        )
+        PillButton("Update app", false, { Updater.update(context) })
     }
 }
 

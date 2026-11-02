@@ -51,7 +51,7 @@ import java.time.ZoneId
 import kotlin.math.max
 
 @Composable
-internal fun StatsScreen(log: FocusLog, settings: ClockSettings, onChooseFolder: () -> Unit, onBack: () -> Unit) {
+internal fun StatsScreen(log: FocusLog, settings: ClockSettings, onBack: () -> Unit) {
     val u = scale()
     BackHandler(onBack = onBack)
     var period by remember { mutableStateOf(Period.Week) }
@@ -109,12 +109,6 @@ internal fun StatsScreen(log: FocusLog, settings: ClockSettings, onChooseFolder:
             Figure(u, report.sessions.toString(), "Sessions", Modifier.weight(1f))
             Figure(u, FocusStats.duration(report.longestMinutes), "Longest", Modifier.weight(1f))
             Figure(u, report.thirdValue, report.thirdLabel, Modifier.weight(1f))
-        }
-        if (!log.hasFolder) {
-            Text(
-                "Choose a data folder", color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light, textDecoration = TextDecoration.Underline,
-                modifier = Modifier.padding(top = (30 * u).dp).clickable(onClick = onChooseFolder).padding(vertical = (8 * u).dp),
-            )
         }
     }
 }

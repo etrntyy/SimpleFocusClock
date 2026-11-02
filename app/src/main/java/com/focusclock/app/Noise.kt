@@ -130,26 +130,47 @@ class NoisePlayer(private val context: Context, private val speakerToo: () -> Bo
     }
 
     private fun run(kind: NoiseKind, alive: AtomicBoolean) {
-        val recording = Recordings.assetFor(kind)?.let { path -> runCatching { Recordings.load(context, path) }.getOrNull() }
-        if (!alive.get()) return
-        if (recording != null) loop(recording, alive) else generate(kind, alive)
+        val path = Recordings.assetFor(kind)
+        if (path != null && stream(path, alive)) return
+        if (alive.get()) generate(kind, alive)
     }
 
-    private fun loop(pcm: Pcm, alive: AtomicBoolean) {
-        val track = track(pcm.sampleRate, pcm.channels)
-        track.play()
+    /**
+     * Plays a recording as it is decoded, looped without a seam, so it starts at once. Returns false if the recording
+     * could not be opened, so the generated version of the sound can play instead.
+     */
+    private fun stream(path: String, alive: AtomicBoolean): Boolean {
+        val source = runCatching { RecordingSource(context, path) }.getOrNull() ?: return false
+        var track: AudioTrack? = null
         try {
-            var pos = 0
-            val chunk = 4096 * pcm.channels
-            while (alive.get()) {
-                val n = minOf(chunk, pcm.data.size - pos)
-                track.write(pcm.data, pos, n)
-                pos += n
-                if (pos >= pcm.data.size) pos = 0
+            val crossfade = minOf((3.0 * source.sampleRate).toInt(), (source.estimatedFrames / 4).toInt()).coerceAtLeast(1)
+            val splicer = LoopSplicer(source.channels, crossfade, source.estimatedFrames)
+            val t = track(source.sampleRate, source.channels)
+            track = t
+            t.play()
+            val emit = { data: ShortArray, offset: Int, length: Int ->
+                var done = 0
+                while (done < length && alive.get()) {
+                    val n = t.write(data, offset + done, length - done)
+                    if (n <= 0) break
+                    done += n
+                }
             }
+            while (alive.get()) {
+                splicer.beginPass()
+                while (alive.get()) splicer.feed(source.next() ?: break, emit)
+                if (!alive.get()) break
+                splicer.endPass(emit)
+                source.restart()
+            }
+            return true
+        } catch (e: Exception) {
+            return false
         } finally {
             current = null
-            track.stop(); track.release()
+            runCatching { track?.stop() }
+            track?.release()
+            source.close()
         }
     }
 

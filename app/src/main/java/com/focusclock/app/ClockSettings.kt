@@ -38,7 +38,10 @@ class ClockSettings(context: Context) {
     /** The drawn clock face in use, or -1 for the digital clock in the chosen font. */
     var style by mutableStateOf(sp.getInt("style", -1).takeIf { it in AnalogStyle.entries.indices } ?: -1)
         private set
-    /** Whether the Fractals section shows black and white versions. */
+    /** The fractal behind the clock, as a saved key, or empty for the plain clock. */
+    var fractalBackground by mutableStateOf(sp.getString("fractal_bg", "").orEmpty())
+        private set
+    /** Whether the Fractals section shows the monochrome versions. */
     var fractalMono by mutableStateOf(sp.getBoolean("fractal_mono", false))
         private set
     var fontIndex by mutableStateOf(sp.getInt("font", 0).coerceIn(ClockFonts.indices))
@@ -85,6 +88,7 @@ class ClockSettings(context: Context) {
     fun updateNoiseSpeaker(v: Boolean) { noiseSpeaker = v; sp.edit().putBoolean("noise_speaker", v).apply() }
     fun updateAppTheme(v: AppTheme) { appTheme = v; sp.edit().putInt("app_theme", v.ordinal).apply() }
     fun updateClockTheme(v: ClockTheme) { clockTheme = v; sp.edit().putInt("clock_theme", v.ordinal).apply() }
+    fun updateFractalBackground(v: String) { fractalBackground = v; sp.edit().putString("fractal_bg", v).apply() }
     fun updateFractalMono(v: Boolean) { fractalMono = v; sp.edit().putBoolean("fractal_mono", v).apply() }
     fun updateFontIndex(v: Int) { fontIndex = v; sp.edit().putInt("font", v).apply() }
     fun updateStyle(v: Int) { style = v; sp.edit().putInt("style", v).apply() }
