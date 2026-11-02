@@ -717,6 +717,8 @@ private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrant
                     listOf("Daily" to Period.Day, "Weekly" to Period.Week, "Monthly" to Period.Month, "Yearly" to Period.Year).forEach { (label, period) ->
                         TargetRow(label, settings.target(period), targetStep(period)) { settings.updateTarget(period, it) }
                     }
+                    SectionTitle("App updates")
+                    UpdateRow()
                     SectionTitle("Clock style")
                 }
             }
@@ -751,6 +753,31 @@ private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrant
                 }
             }
         }
+    }
+}
+
+/** The version in use, what the update is doing, and the button that checks for a newer release and installs it. */
+@Composable
+private fun UpdateRow() {
+    val u = scale()
+    val context = LocalContext.current
+    val installed = remember { Updater.installedVersion(context) }
+    val state = Updater.state
+    val status = when (state) {
+        UpdateState.Idle -> "Version $installed"
+        UpdateState.Checking -> "Checking for a new version…"
+        is UpdateState.UpToDate -> "You have the latest version, ${state.version}"
+        is UpdateState.Downloading -> "Downloading ${state.version}, ${state.percent}%"
+        is UpdateState.Installing -> "Installing ${state.version}…"
+        UpdateState.NeedsPermission -> "Allow this app to install updates, then tap Update app again"
+        is UpdateState.Failed -> state.reason
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = (8 * u).dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(status, color = Color.White, fontSize = (19 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.weight(1f).padding(end = (12 * u).dp))
+        PillButton(
+            if (state == UpdateState.NeedsPermission) "Allow" else "Update app", false,
+            { if (state == UpdateState.NeedsPermission) Updater.openPermissionPage(context) else Updater.update(context) },
+        )
     }
 }
 
