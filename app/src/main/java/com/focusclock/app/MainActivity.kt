@@ -1,6 +1,9 @@
 package com.focusclock.app
 
 import android.Manifest
+import android.graphics.drawable.ColorDrawable
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.SideEffect
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.RingtoneManager
@@ -66,7 +69,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -91,7 +93,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -100,7 +101,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,9 +115,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private const val CREDITS = "Sound recordings from Wikimedia Commons. Campfire by Glaneur de sons (CC BY 3.0), fan by Gravity Sound (CC BY 4.0). Full credits on GitHub."
-
-private enum class Screen { HOME, CLOCK, SETTINGS, STATS, TOOLS, TIMER_SET, TIMER, STOPWATCH, ALARMS }
+private enum class Screen { HOME, CLOCK, SETTINGS, STATS, TOOLS, TIMER_SET, TIMER, STOPWATCH, ALARMS, FRACTALS, FRACTAL }
 
 class MainActivity : ComponentActivity() {
     private lateinit var settings: ClockSettings
@@ -125,8 +123,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var log: FocusLog
     private lateinit var schedule: Schedule
     private var stopwatch by mutableStateOf(Stopwatch())
+    private var fractal by mutableStateOf<FractalChoice>(FractalChoice.Shuffle)
     private var toneResult: ((String) -> Unit)? = null
-    private val noise by lazy { NoisePlayer(applicationContext) }
+    private val noise by lazy { NoisePlayer(applicationContext, speakerToo = { settings.noiseSpeaker }, onEnded = { playing = null }) }
     private var screen by mutableStateOf(Screen.HOME)
     private var permissionTick by mutableStateOf(0)
     private var playing by mutableStateOf<NoiseKind?>(null)
@@ -153,7 +152,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /** The screens where the phone stays awake, pinned in focus mode, and the time counts as focus. */
-    private val immersive get() = screen == Screen.CLOCK || screen == Screen.TIMER || screen == Screen.STOPWATCH
+    private val immersive get() = screen == Screen.CLOCK || screen == Screen.TIMER || screen == Screen.STOPWATCH || screen == Screen.FRACTAL
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -168,7 +167,15 @@ class MainActivity : ComponentActivity() {
         volumeControlStream = AudioManager.STREAM_ALARM
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(background = Color.Black, surface = Color.Black)) {
-                Box(Modifier.fillMaxSize().background(Color.Black)) {
+                val systemDark = isSystemInDarkTheme()
+                val light = isLight(settings.appTheme, settings.clockTheme, systemDark, immersive)
+                SideEffect {
+                    window.setBackgroundDrawable(ColorDrawable(if (light) android.graphics.Color.WHITE else android.graphics.Color.BLACK))
+                    WindowCompat.getInsetsController(window, window.decorView).apply { isAppearanceLightStatusBars = light; isAppearanceLightNavigationBars = light }
+                }
+                // The GPU fractals flip themselves (black and white ones only), so the colour ones are never inverted.
+                val flipHere = light && !(screen == Screen.FRACTAL && fractal.onGpu)
+                Box(Modifier.fillMaxSize().inverted(flipHere).background(Color.Black)) {
                     when (screen) {
                         Screen.HOME -> Home(
                             playing = playing,
@@ -180,6 +187,7 @@ class MainActivity : ComponentActivity() {
                             onSettings = { screen = Screen.SETTINGS },
                             onStats = { screen = Screen.STATS },
                             onTools = { screen = Screen.TOOLS },
+                            onFractals = { screen = Screen.FRACTALS },
                             onToggleNoise = ::toggleNoise,
                         )
                         Screen.CLOCK -> ClockScreen(
@@ -194,6 +202,7 @@ class MainActivity : ComponentActivity() {
                             settings = settings,
                             canSilence = permissionTick >= 0 && focus.canSilence,
                             onGrantSilence = { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) },
+                            onSpeakerChange = { settings.updateNoiseSpeaker(it); if (playing != null) noise.refresh() },
                             onBack = { screen = Screen.HOME },
                         )
                         Screen.STATS -> StatsScreen(
@@ -202,6 +211,13 @@ class MainActivity : ComponentActivity() {
                             onChooseFolder = { pickFolder.launch(null) },
                             onBack = { screen = Screen.HOME },
                         )
+                        Screen.FRACTALS -> FractalsScreen(
+                            mono = settings.fractalMono,
+                            onMono = settings::updateFractalMono,
+                            onPick = { fractal = it; enter(Screen.FRACTAL) },
+                            onBack = { screen = Screen.HOME },
+                        )
+                        Screen.FRACTAL -> FractalScreen(fractal, settings.fractalMono, light, settings, focus, onExit = { leave(Screen.FRACTALS) })
                         Screen.TOOLS -> ToolsScreen(
                             schedule = schedule,
                             stopwatch = stopwatch,
@@ -221,11 +237,11 @@ class MainActivity : ComponentActivity() {
                         )
                         Screen.TIMER -> {
                             ImmersiveEffects(settings, focus, onExit = { leave(Screen.TOOLS) })
-                            TimerScreen(settings, schedule, onExit = { leave(Screen.TOOLS) })
+                            TimerScreen(settings, schedule, focus, onExit = { leave(Screen.TOOLS) })
                         }
                         Screen.STOPWATCH -> {
                             ImmersiveEffects(settings, focus, onExit = { leave(Screen.TOOLS) })
-                            StopwatchScreen(settings, stopwatch, onChange = { stopwatch = it }, onExit = { leave(Screen.TOOLS) })
+                            StopwatchScreen(settings, stopwatch, focus, onChange = { stopwatch = it }, onExit = { leave(Screen.TOOLS) })
                         }
                         Screen.ALARMS -> AlarmsScreen(
                             schedule = schedule,
@@ -337,7 +353,7 @@ internal fun Modifier.fadeToBottom(from: Float) = this
     }
 
 @Composable
-private fun Home(playing: NoiseKind?, todayMinutes: Double, dailyTarget: Int, onStart: () -> Unit, onSettings: () -> Unit, onStats: () -> Unit, onTools: () -> Unit, onToggleNoise: (NoiseKind) -> Unit) {
+private fun Home(playing: NoiseKind?, todayMinutes: Double, dailyTarget: Int, onStart: () -> Unit, onSettings: () -> Unit, onStats: () -> Unit, onTools: () -> Unit, onFractals: () -> Unit, onToggleNoise: (NoiseKind) -> Unit) {
     val u = scale()
     Box(Modifier.fillMaxSize().statusBarsPadding()) {
         BoxWithConstraints(Modifier.fillMaxSize().padding(top = (64 * u).dp)) {
@@ -355,29 +371,35 @@ private fun Home(playing: NoiseKind?, todayMinutes: Double, dailyTarget: Int, on
                 }
             }
         }
-        Text(
-            "Simple Focus Clock", color = Color.White, fontSize = (21 * u).sp, fontWeight = FontWeight.Light, letterSpacing = (1.5 * u).sp,
-            modifier = Modifier.align(Alignment.TopStart).padding(start = (28 * u).dp, top = (22 * u).dp),
-        )
-        Icon(
-            Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White,
-            modifier = Modifier.align(Alignment.TopEnd).padding((12 * u).dp).size((52 * u).dp)
-                .clip(CircleShape).clickable(onClick = onSettings).padding((10 * u).dp),
-        )
-        StatsIcon(u, onStats, Modifier.align(Alignment.TopEnd).padding(top = (64 * u).dp, end = (12 * u).dp))
-        ToolsIcon(onTools, Modifier.align(Alignment.TopEnd).padding(top = (116 * u).dp, end = (12 * u).dp))
+        Row(
+            Modifier.align(Alignment.TopCenter).padding(top = (12 * u).dp),
+            horizontalArrangement = Arrangement.spacedBy((14 * u).dp),
+        ) {
+            StatsIcon(u, onStats, Modifier)
+            ToolsIcon(onTools, Modifier)
+            FractalsIcon(onFractals, Modifier)
+            Box(
+                Modifier.size((52 * u).dp).clip(CircleShape).clickable(onClick = onSettings).semantics { contentDescription = "Settings" },
+                contentAlignment = Alignment.Center,
+            ) { GearIcon((39 * u).dp) }
+        }
     }
 }
 
-/** Three rising bars, drawn in the same white as the gear above it. */
+/** Nine small squares in shades from dark to white, like the days grid of the statistics. */
 @Composable
 private fun StatsIcon(u: Float, onClick: () -> Unit, modifier: Modifier) {
+    val shades = listOf(60, 120, 255, 180, 30, 90, 255, 150, 40)
     Box(
         modifier.size((52 * u).dp).clip(CircleShape).clickable(onClick = onClick).semantics { contentDescription = "Statistics" },
-        contentAlignment = Alignment.BottomCenter,
+        contentAlignment = Alignment.Center,
     ) {
-        Row(Modifier.padding(bottom = (11 * u).dp), horizontalArrangement = Arrangement.spacedBy((3.5 * u).dp), verticalAlignment = Alignment.Bottom) {
-            listOf(14, 30, 21).forEach { Box(Modifier.size(width = (7 * u).dp, height = (it * u).dp).clip(RoundedCornerShape((1.5 * u).dp)).background(Color.White)) }
+        Column(verticalArrangement = Arrangement.spacedBy((2.6 * u).dp)) {
+            shades.chunked(3).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy((2.6 * u).dp)) {
+                    row.forEach { g -> Box(Modifier.size((8.6 * u).dp).clip(RoundedCornerShape((2 * u).dp)).background(Color(g, g, g))) }
+                }
+            }
         }
     }
 }
@@ -485,7 +507,7 @@ internal fun Toggle(checked: Boolean, onChange: (Boolean) -> Unit) {
  * leaves pinned mode with the system gesture the screen falls back out.
  */
 @Composable
-private fun ImmersiveEffects(settings: ClockSettings, focus: Focus, onExit: () -> Unit) {
+internal fun ImmersiveEffects(settings: ClockSettings, focus: Focus, onExit: () -> Unit) {
     val view = LocalView.current
     DisposableEffect(Unit) {
         view.keepScreenOn = true
@@ -518,7 +540,8 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
     var controls by remember { mutableStateOf(false) }
     var touches by remember { mutableStateOf(0) }
 
-    BackHandler(onBack = onExit)
+    // Back does nothing: the only way out is to hold the time.
+    BackHandler { }
     ImmersiveEffects(settings, focus, onExit)
     LaunchedEffect(settings.showSeconds) {
         val period = if (settings.showSeconds) 1_000L else 60_000L
@@ -543,16 +566,21 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
 
     BoxWithConstraints(
         Modifier.fillMaxSize().systemBarsPadding().padding((12 * u).dp)
-            .combinedClickable(onClick = { touches++ }, onLongClick = onExit),
+            .clickable { touches++ },
         contentAlignment = Alignment.Center,
     ) {
         val portrait = maxHeight > maxWidth
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            ClockFace(
-                if (portrait) listOfNotNull(h, m, sec.takeIf { settings.showSeconds }) else listOf(if (settings.showSeconds) "$h:$m:$sec" else "$h:$m"),
-                ClockFonts[settings.fontIndex],
-                Modifier.fillMaxWidth().weight(1f),
-            )
+            val face = Modifier.fillMaxWidth().weight(1f).combinedClickable(onClick = { touches++ }, onLongClick = onExit)
+            if (settings.style >= 0) {
+                AnalogClock(AnalogStyle.entries[settings.style], now, settings.showSeconds, settings.use24h, ClockFonts[settings.fontIndex], face)
+            } else {
+                ClockFace(
+                    if (portrait) listOfNotNull(h, m, sec.takeIf { settings.showSeconds }) else listOf(if (settings.showSeconds) "$h:$m:$sec" else "$h:$m"),
+                    ClockFonts[settings.fontIndex],
+                    face,
+                )
+            }
             if (settings.showDate) {
                 Text(
                     now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.getDefault())),
@@ -574,15 +602,36 @@ private fun ClockScreen(settings: ClockSettings, focus: Focus, playing: Boolean,
                 if (it) focus.enter() else focus.exit()
             }
             PlayPause(playing, (46 * u).dp) { if (controls) { touches++; onToggleSound() } }
-            Icon(
-                Icons.Filled.Close, contentDescription = "Exit", tint = Color.White,
-                modifier = Modifier.size((48 * u).dp).clip(CircleShape).clickable { if (controls) onExit() }.padding((8 * u).dp),
-            )
         }
         Text(
             "Hold the time to exit",
             color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (6 * u).dp).alpha(if (hint) 1f else 0f),
+        )
+        PinHint(settings, focus, Modifier.align(Alignment.BottomCenter))
+    }
+}
+
+/** Shown when focus mode is on but Android has not pinned the app, which usually means app pinning is off in its settings. */
+@Composable
+internal fun PinHint(settings: ClockSettings, focus: Focus, modifier: Modifier) {
+    val u = scale()
+    val context = LocalContext.current
+    var missing by remember { mutableStateOf(false) }
+    LaunchedEffect(settings.focus) {
+        missing = false
+        if (!settings.focus) return@LaunchedEffect
+        delay(8_000)
+        while (true) {
+            missing = !focus.pinned
+            delay(2_000)
+        }
+    }
+    if (missing) {
+        Text(
+            "App pinning is off, so other apps can still open. Tap to open Security settings.",
+            color = Color.White, fontSize = (17 * u).sp, fontWeight = FontWeight.Light, textAlign = TextAlign.Center, textDecoration = TextDecoration.Underline,
+            modifier = modifier.fillMaxWidth().clickable { context.startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }.padding(horizontal = (24 * u).dp, vertical = (14 * u).dp),
         )
     }
 }
@@ -632,22 +681,17 @@ internal fun ClockFace(lines: List<String>, font: ClockFont, modifier: Modifier)
 }
 
 @Composable
-private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrantSilence: () -> Unit, onBack: () -> Unit) {
+private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrantSilence: () -> Unit, onSpeakerChange: (Boolean) -> Unit, onBack: () -> Unit) {
     val u = scale()
     BackHandler(onBack = onBack)
     val top = (36 * u).dp
-    val measurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    val creditsStyle = LocalTextStyle.current.merge(TextStyle(fontSize = (14 * u).sp, fontWeight = FontWeight.Light))
+    val fontRow = (78 * u).dp
     BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding()) {
-        // The list can be scrolled until the last item sits where the first one starts, in full brightness.
-        val creditsHeight = with(density) {
-            measurer.measure(CREDITS, creditsStyle, constraints = Constraints(maxWidth = (maxWidth - (50 * u).dp).roundToPx())).size.height.toDp()
-        }
+        // The list can be scrolled until the last row of fonts sits where the first item starts, in full brightness.
         LazyVerticalGrid(
             GridCells.Adaptive((150 * u).dp),
             Modifier.fillMaxSize().fadeToBottom(0.72f),
-            contentPadding = PaddingValues(start = (25 * u).dp, end = (25 * u).dp, top = top, bottom = (maxHeight - top - creditsHeight).coerceAtLeast(0.dp)),
+            contentPadding = PaddingValues(start = (25 * u).dp, end = (25 * u).dp, top = top, bottom = (maxHeight - top - fontRow).coerceAtLeast(0.dp)),
             horizontalArrangement = Arrangement.spacedBy((12 * u).dp),
             verticalArrangement = Arrangement.spacedBy((12 * u).dp),
         ) {
@@ -664,26 +708,38 @@ private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrant
                     ToggleRow("Show date", settings.showDate, settings::updateShowDate)
                     ToggleRow("24-hour time", settings.use24h, settings::updateUse24h)
                     ToggleRow("Show seconds", settings.showSeconds, settings::updateShowSeconds)
-                    Text(
-                        "Focus targets", color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
-                        modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp),
-                    )
+                    ToggleRow("Speaker with headphones", settings.noiseSpeaker, onSpeakerChange)
+                    SectionTitle("App theme")
+                    Segmented(AppTheme.entries.map { it.label }, settings.appTheme.ordinal) { settings.updateAppTheme(AppTheme.entries[it]) }
+                    SectionTitle("Clock theme")
+                    Segmented(ClockTheme.entries.map { it.label }, settings.clockTheme.ordinal) { settings.updateClockTheme(ClockTheme.entries[it]) }
+                    SectionTitle("Focus targets")
                     listOf("Daily" to Period.Day, "Weekly" to Period.Week, "Monthly" to Period.Month, "Yearly" to Period.Year).forEach { (label, period) ->
                         TargetRow(label, settings.target(period), targetStep(period)) { settings.updateTarget(period, it) }
                     }
-                    Text(
-                        "Font", color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light,
-                        modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp),
-                    )
+                    SectionTitle("Clock style")
+                }
+            }
+            itemsIndexed(AnalogStyle.entries) { i, face ->
+                val selected = i == settings.style
+                Box(
+                    Modifier.fillMaxWidth().height(fontRow)
+                        .clip(RoundedCornerShape((18 * u).dp))
+                        .border(((if (selected) 3.5 else 1.2) * u).dp, Color.White, RoundedCornerShape((18 * u).dp))
+                        .clickable { settings.updateStyle(i) }
+                        .semantics { contentDescription = face.label },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AnalogClock(face, LocalDateTime.of(2026, 11, 2, 10, 42, 7), false, settings.use24h, ClockFonts[settings.fontIndex], Modifier.size(fontRow - (14 * u).dp))
                 }
             }
             itemsIndexed(ClockFonts) { i, f ->
-                val selected = i == settings.fontIndex
+                val selected = settings.style < 0 && i == settings.fontIndex
                 Box(
-                    Modifier.fillMaxWidth().height((78 * u).dp)
+                    Modifier.fillMaxWidth().height(fontRow)
                         .clip(RoundedCornerShape((18 * u).dp))
                         .border(((if (selected) 3.5 else 1.2) * u).dp, Color.White, RoundedCornerShape((18 * u).dp))
-                        .clickable { settings.updateFontIndex(i) },
+                        .clickable { settings.chooseFont(i) },
                     contentAlignment = Alignment.Center,
                 ) {
                     BasicText(
@@ -694,8 +750,29 @@ private fun SettingsScreen(settings: ClockSettings, canSilence: Boolean, onGrant
                     )
                 }
             }
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Text(CREDITS, color = Color.White, fontSize = (14 * u).sp, fontWeight = FontWeight.Light)
+        }
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    val u = scale()
+    Text(text, color = Color.White, fontSize = (25 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.padding(top = (26 * u).dp, bottom = (8 * u).dp))
+}
+
+/** A row of equal choices; the chosen one is solid white. */
+@Composable
+internal fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+    val u = scale()
+    Row(Modifier.fillMaxWidth().padding(bottom = (4 * u).dp), horizontalArrangement = Arrangement.spacedBy((8 * u).dp)) {
+        options.forEachIndexed { i, label ->
+            val on = i == selected
+            Box(
+                Modifier.weight(1f).clip(RoundedCornerShape(50)).background(if (on) Color.White else Color.Black)
+                    .border((2 * u).dp, Color.White, RoundedCornerShape(50)).clickable { onSelect(i) }.padding(vertical = (10 * u).dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, color = if (on) Color.Black else Color.White, fontSize = (19 * u).sp, fontWeight = if (on) FontWeight.Normal else FontWeight.Light, maxLines = 1)
             }
         }
     }

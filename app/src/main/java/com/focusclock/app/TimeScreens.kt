@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -60,6 +61,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -155,23 +159,41 @@ private fun PlayOrPause(running: Boolean, size: Dp) {
 
 // Icons the core icon set lacks, drawn in the same thin white line as the rest of the app.
 
+/** Draws thin rounded outline icons from 24-unit SVG paths, so the gear and hourglass match the look of the first mockups. */
 @Composable
-internal fun HourglassIcon(size: Dp, modifier: Modifier = Modifier) {
+private fun OutlineIcon(size: Dp, paths: List<String>, modifier: Modifier = Modifier) {
     val u = scale()
+    val parsed = remember(paths) { paths.map { PathParser().parsePathString(it).toPath() } }
     Canvas(modifier.size(size)) {
-        val w = this.size.width
-        val h = this.size.height
-        val s = Stroke(2.6f * u * density, cap = StrokeCap.Round)
-        drawLine(Color.White, Offset(w * 0.2f, h * 0.08f), Offset(w * 0.8f, h * 0.08f), s.width, StrokeCap.Round)
-        drawLine(Color.White, Offset(w * 0.2f, h * 0.92f), Offset(w * 0.8f, h * 0.92f), s.width, StrokeCap.Round)
-        listOf(0.26f to 0.74f).forEach { (l, r) ->
-            drawLine(Color.White, Offset(w * l, h * 0.08f), Offset(w * 0.5f, h * 0.5f), s.width, StrokeCap.Round)
-            drawLine(Color.White, Offset(w * r, h * 0.08f), Offset(w * 0.5f, h * 0.5f), s.width, StrokeCap.Round)
-            drawLine(Color.White, Offset(w * l, h * 0.92f), Offset(w * 0.5f, h * 0.5f), s.width, StrokeCap.Round)
-            drawLine(Color.White, Offset(w * r, h * 0.92f), Offset(w * 0.5f, h * 0.5f), s.width, StrokeCap.Round)
+        val k = this.size.width / 24f
+        // The line is the same thickness whatever the size of the icon, so every icon on the home screen matches.
+        val line = 2.6f * u * density / k
+        withTransform({ scale(k, k, Offset.Zero) }) {
+            parsed.forEach { drawPath(it, Color.White, style = Stroke(line, cap = StrokeCap.Round, join = StrokeJoin.Round)) }
         }
     }
 }
+
+@Composable
+internal fun HourglassIcon(size: Dp, modifier: Modifier = Modifier) = OutlineIcon(
+    size,
+    listOf(
+        "M6.5 7h11", "M6.5 17h11",
+        "M6 20v-2a6 6 0 1 1 12 0v2a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1z",
+        "M6 4v2a6 6 0 1 0 12 0v-2a1 1 0 0 0 -1 -1h-10a1 1 0 0 0 -1 1z",
+    ),
+    modifier,
+)
+
+@Composable
+internal fun GearIcon(size: Dp, modifier: Modifier = Modifier) = OutlineIcon(
+    size,
+    listOf(
+        "M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z",
+        "M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0",
+    ),
+    modifier,
+)
 
 @Composable
 internal fun StopwatchIcon(size: Dp, modifier: Modifier = Modifier) {
@@ -192,7 +214,7 @@ internal fun StopwatchIcon(size: Dp, modifier: Modifier = Modifier) {
 internal fun ToolsIcon(onClick: () -> Unit, modifier: Modifier) {
     val u = scale()
     Box(modifier.size((52 * u).dp).clip(CircleShape).clickable(onClick = onClick).semantics { contentDescription = "Timer, stopwatch and alarms" }, contentAlignment = Alignment.Center) {
-        HourglassIcon((30 * u).dp)
+        HourglassIcon((41 * u).dp)
     }
 }
 
@@ -323,9 +345,12 @@ internal fun TimerSetupScreen(onStart: (Long) -> Unit, onBack: () -> Unit) {
 
 /** The running timer, full screen like the clock. A finished timer is shown by [RingingScreen] on top of it. */
 @Composable
-internal fun TimerScreen(settings: ClockSettings, schedule: Schedule, onExit: () -> Unit) {
+internal fun TimerScreen(settings: ClockSettings, schedule: Schedule, focus: Focus, onExit: () -> Unit) {
     val u = scale()
-    BackHandler(onBack = onExit)
+    // Back does nothing: the only way out is to hold the time.
+    BackHandler { }
+    var hint by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) { delay(4_000); hint = false }
     val timer = schedule.timer
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(timer) {
@@ -342,13 +367,9 @@ internal fun TimerScreen(settings: ClockSettings, schedule: Schedule, onExit: ()
     BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding((12 * u).dp)) {
         val portrait = maxHeight > maxWidth
         Label("Timer", 22f, Modifier.padding(start = (16 * u).dp, top = (10 * u).dp))
-        Icon(
-            Icons.Filled.Close, contentDescription = "Leave the timer running", tint = Color.White,
-            modifier = Modifier.align(Alignment.TopEnd).size((48 * u).dp).clip(CircleShape).clickable(onClick = onExit).padding((8 * u).dp),
-        )
         val digits = @Composable { modifier: Modifier ->
             Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                ClockFace(listOf(TimeFormat.countdown(left)), ClockFonts[settings.fontIndex], Modifier.fillMaxWidth().weight(1f))
+                ClockFace(listOf(TimeFormat.countdown(left)), ClockFonts[settings.fontIndex], Modifier.fillMaxWidth().weight(1f).combinedClickable(onClick = {}, onLongClick = onExit))
                 Box(Modifier.padding(top = (14 * u).dp).fillMaxWidth(0.62f).height((3 * u).dp).background(Color.White.copy(alpha = 0.25f))) {
                     Box(Modifier.fillMaxWidth((left.toFloat() / t.totalMs).coerceIn(0f, 1f)).fillMaxHeight().background(Color.White))
                 }
@@ -374,13 +395,18 @@ internal fun TimerScreen(settings: ClockSettings, schedule: Schedule, onExit: ()
                 Column(Modifier.weight(0.8f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy((16 * u).dp)) { controls() }
             }
         }
+        PinHint(settings, focus, Modifier.align(Alignment.BottomCenter))
+        Label("Hold the time to leave", 17f, Modifier.align(Alignment.BottomCenter).padding(bottom = (6 * u).dp).graphicsLayer { alpha = if (hint) 1f else 0f })
     }
 }
 
 @Composable
-internal fun StopwatchScreen(settings: ClockSettings, stopwatch: Stopwatch, onChange: (Stopwatch) -> Unit, onExit: () -> Unit) {
+internal fun StopwatchScreen(settings: ClockSettings, stopwatch: Stopwatch, focus: Focus, onChange: (Stopwatch) -> Unit, onExit: () -> Unit) {
     val u = scale()
-    BackHandler(onBack = onExit)
+    // Back does nothing: the only way out is to hold the time.
+    BackHandler { }
+    var hint by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) { delay(4_000); hint = false }
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     LaunchedEffect(stopwatch) {
         now = SystemClock.elapsedRealtime()
@@ -394,13 +420,9 @@ internal fun StopwatchScreen(settings: ClockSettings, stopwatch: Stopwatch, onCh
     BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding((12 * u).dp)) {
         val portrait = maxHeight > maxWidth
         Label("Stopwatch", 22f, Modifier.padding(start = (16 * u).dp, top = (10 * u).dp))
-        Icon(
-            Icons.Filled.Close, contentDescription = "Leave the stopwatch", tint = Color.White,
-            modifier = Modifier.align(Alignment.TopEnd).size((48 * u).dp).clip(CircleShape).clickable(onClick = onExit).padding((8 * u).dp),
-        )
         val digits = @Composable { modifier: Modifier ->
             Row(modifier, verticalAlignment = Alignment.Bottom) {
-                ClockFace(listOf(main), ClockFonts[settings.fontIndex], Modifier.weight(1f).fillMaxHeight())
+                ClockFace(listOf(main), ClockFonts[settings.fontIndex], Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = {}, onLongClick = onExit))
                 Label(".$hundredths", 36f, Modifier.padding(start = (4 * u).dp, bottom = (6 * u).dp), dim = true)
             }
         }
@@ -447,6 +469,8 @@ internal fun StopwatchScreen(settings: ClockSettings, stopwatch: Stopwatch, onCh
                 laps(Modifier.weight(0.8f).fillMaxHeight().padding(start = (16 * u).dp))
             }
         }
+        PinHint(settings, focus, Modifier.align(Alignment.BottomCenter))
+        Label("Hold the time to leave", 17f, Modifier.align(Alignment.BottomCenter).padding(bottom = (6 * u).dp).graphicsLayer { alpha = if (hint) 1f else 0f })
     }
 }
 

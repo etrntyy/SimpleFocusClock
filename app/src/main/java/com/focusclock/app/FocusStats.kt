@@ -4,12 +4,20 @@ import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import java.time.format.TextStyle
 import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/** Focus minutes for each day from [first], a Monday, to the last day of the history; day i sits in column i / 7, row i % 7. */
+class DayGrid(val first: LocalDate, val minutes: DoubleArray) {
+    val last: LocalDate get() = first.plusDays(minutes.size - 1L)
+    val columns: Int get() = (minutes.size + 6) / 7
+    fun date(i: Int): LocalDate = first.plusDays(i.toLong())
+}
 
 /** One stretch of time the clock was open, in epoch milliseconds. */
 data class Session(val start: Long, val end: Long) {
@@ -147,6 +155,26 @@ object FocusStats {
         if (perHour || m < 60) return "${m}m"
         val h = (minutes / 60 * 10).roundToInt() / 10.0
         return if (h == h.toInt().toDouble()) "${h.toInt()}h" else "$h" + "h"
+    }
+
+    /** Minutes of focus that fill a day's square completely. */
+    const val FULL_DAY_MINUTES = 360.0
+
+    /** The grey of a day's square, 0 to 1: the faintest dark grey for no focus, rising evenly to white at six hours. */
+    fun heat(minutes: Double): Float {
+        val low = 22f / 255f
+        return low + (1f - low) * (minutes / FULL_DAY_MINUTES).coerceIn(0.0, 1.0).toFloat()
+    }
+
+    /** Every day from the Monday that starts the history, or half a year back if that is later, up to today. */
+    fun dayGrid(sessions: List<Session>, now: Long, zone: ZoneId, minWeeks: Int = 26): DayGrid {
+        val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+        val firstSession = sessions.minOfOrNull { Instant.ofEpochMilli(it.start).atZone(zone).toLocalDate() } ?: today
+        val earliest = minOf(firstSession, today.minusWeeks(minWeeks - 1L))
+        val first = earliest.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+        val days = ChronoUnit.DAYS.between(first, today).toInt() + 1
+        val edges = (0..days).map { first.plusDays(it.toLong()).atStartOfDay(zone).toInstant().toEpochMilli() }
+        return DayGrid(first, buckets(sessions, edges))
     }
 
     /** A target as the settings show it: "Off", "45m", "2h", "1h 15m". */

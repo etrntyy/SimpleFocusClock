@@ -2,8 +2,14 @@ package com.focusclock.app
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
 import kotlin.math.exp
@@ -31,23 +37,77 @@ enum class NoiseKind(val label: String, val coloured: Boolean = false) {
     Fan("Fan"),
 }
 
+/** Which of the connected outputs count as headphones. */
+object Headphones {
+    private val types = buildSet {
+        add(AudioDeviceInfo.TYPE_WIRED_HEADPHONES)
+        add(AudioDeviceInfo.TYPE_WIRED_HEADSET)
+        add(AudioDeviceInfo.TYPE_USB_HEADSET)
+        add(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        add(AudioDeviceInfo.TYPE_HEARING_AID)
+        if (Build.VERSION.SDK_INT >= 31) add(AudioDeviceInfo.TYPE_BLE_HEADSET)
+    }
+
+    /** The index of the first headphone type in [deviceTypes], or null when none is connected. */
+    fun pick(deviceTypes: List<Int>): Int? = deviceTypes.indexOfFirst { it in types }.takeIf { it >= 0 }
+}
+
 /**
- * Plays a noise through an [AudioTrack]. Alarm usage keeps it audible under alarms-only Do Not Disturb. The natural
- * sounds are real recordings; if one can't be opened, the generated version of that sound plays instead.
+ * Plays a noise through an [AudioTrack]. Alarm usage keeps it audible under alarms-only Do Not Disturb, but Android sends
+ * alarms to the speaker as well as headphones, so unless [speakerToo] is on the track is pinned to the headphones while
+ * any are connected, and the noise stops if they are taken off. The natural sounds are real recordings; if one can't be
+ * opened, the generated version of that sound plays instead.
  */
-class NoisePlayer(private val context: Context) {
+class NoisePlayer(private val context: Context, private val speakerToo: () -> Boolean = { false }, private val onEnded: () -> Unit = {}) {
     private var running: AtomicBoolean? = null
+    private val audio = context.getSystemService(AudioManager::class.java)
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var current: AudioTrack? = null
+    @Volatile private var onHeadphones = false
+
+    private val devices = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) { current?.let(::route) }
+
+        override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) {
+            if (!speakerToo() && onHeadphones && headphones() == null) {
+                // The headphones came off: stop rather than start filling the room.
+                stop()
+                onEnded()
+            } else {
+                current?.let(::route)
+            }
+        }
+    }
 
     fun play(kind: NoiseKind) {
         stop()
         val flag = AtomicBoolean(true)
         running = flag
+        audio.registerAudioDeviceCallback(devices, main)
         Thread({ run(kind, flag) }, "noise").start()
     }
 
     fun stop() {
         running?.set(false)
         running = null
+        audio.unregisterAudioDeviceCallback(devices)
+        onHeadphones = false
+    }
+
+    /** Applies the speaker setting to a noise that is already playing. */
+    fun refresh() {
+        current?.let(::route)
+    }
+
+    private fun headphones(): AudioDeviceInfo? {
+        val out = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        return Headphones.pick(out.map { it.type })?.let { out[it] }
+    }
+
+    private fun route(track: AudioTrack) {
+        val phones = if (speakerToo()) null else headphones()
+        track.preferredDevice = phones
+        onHeadphones = phones != null
     }
 
     private fun track(rate: Int, channels: Int): AudioTrack {
@@ -65,6 +125,8 @@ class NoisePlayer(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setBufferSizeInBytes(rate / 2 * 2 * channels)
             .build()
+            .also(::route)
+            .also { current = it }
     }
 
     private fun run(kind: NoiseKind, alive: AtomicBoolean) {
@@ -86,6 +148,7 @@ class NoisePlayer(private val context: Context) {
                 if (pos >= pcm.data.size) pos = 0
             }
         } finally {
+            current = null
             track.stop(); track.release()
         }
     }
@@ -108,6 +171,7 @@ class NoisePlayer(private val context: Context) {
                 track.write(frames, 0, frames.size)
             }
         } finally {
+            current = null
             track.stop(); track.release()
         }
     }

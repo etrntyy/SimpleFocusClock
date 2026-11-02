@@ -103,7 +103,7 @@ internal fun StatsScreen(log: FocusLog, settings: ClockSettings, onChooseFolder:
             Text("target ${FocusStats.target(target)}", color = Color.White, fontSize = (21 * u).sp, fontWeight = FontWeight.Light, modifier = Modifier.padding(top = (8 * u).dp))
         }
         Spacer(Modifier.height((44 * u).dp))
-        BarChart(u, report, line)
+        if (period == Period.All) DaysGrid(u, sessions) else BarChart(u, report, line)
         Spacer(Modifier.height((30 * u).dp))
         Row(Modifier.fillMaxWidth()) {
             Figure(u, report.sessions.toString(), "Sessions", Modifier.weight(1f))
